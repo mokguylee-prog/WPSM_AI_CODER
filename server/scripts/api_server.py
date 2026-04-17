@@ -5,6 +5,8 @@ import time
 import json
 import traceback
 import itertools
+import queue
+import threading
 from typing import Optional
 from collections import deque
 from datetime import datetime
@@ -19,7 +21,7 @@ if _PROJECT_ROOT_FOR_PATH not in sys.path:
 try:
     from llama_cpp import Llama
     from fastapi import FastAPI, HTTPException
-    from fastapi.responses import HTMLResponse, FileResponse
+    from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
     from pydantic import BaseModel
     import uvicorn
 except ImportError as e:
@@ -163,6 +165,13 @@ class ChatRequest(BaseModel):
     top_p: float = 0.95
 
 
+class ChatStreamRequest(BaseModel):
+    messages: list[ChatMessage]
+    max_tokens: int = 1024
+    temperature: float = 0.3
+    top_p: float = 0.95
+
+
 class GenerateRequest(BaseModel):
     prompt: str
     system: str = SYSTEM_PROMPT
@@ -269,6 +278,65 @@ def chat(req: ChatRequest):
         traceback.print_exc()
         fail_request(entry, f"{type(e).__name__}: {e}")
         raise HTTPException(500, f"Generation failed: {type(e).__name__}: {e}")
+
+
+@app.post("/chat/stream")
+def chat_stream(req: ChatStreamRequest):
+    if llm is None:
+        raise HTTPException(503, "Model is loading")
+
+    messages = [{"role": m.role, "content": m.content} for m in req.messages]
+    if not messages or messages[0]["role"] != "system":
+        messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+
+    user_msgs = [m.content for m in req.messages if m.role == "user"]
+    entry = begin_request(user_msgs[-1] if user_msgs else "", kind="chat")
+    q: "queue.Queue[object]" = queue.Queue()
+    done = object()
+
+    def worker():
+        try:
+            max_tokens = _clamp_max_tokens(messages, req.max_tokens)
+            t0 = time.time()
+            chunks = []
+            stream = llm.create_chat_completion(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=req.temperature,
+                top_p=req.top_p,
+                stream=True,
+            )
+            for piece in stream:
+                delta = piece["choices"][0].get("delta", {})
+                token = delta.get("content", "")
+                if token:
+                    chunks.append(token)
+                    q.put({"type": "token", "text": token})
+            elapsed = (time.time() - t0) * 1000
+            response_text = "".join(chunks)
+            finish_request(entry, 0, 0, elapsed, response_text)
+            q.put({"type": "final", "response": response_text, "elapsed_ms": round(elapsed)})
+        except Exception as e:
+            traceback.print_exc()
+            fail_request(entry, f"{type(e).__name__}: {e}")
+            q.put({"type": "error", "error": f"{type(e).__name__}: {e}"})
+        finally:
+            q.put(done)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def gen():
+        while True:
+            try:
+                item = q.get(timeout=2.0)
+            except queue.Empty:
+                yield json.dumps({"type": "heartbeat", "ts": time.time()}, ensure_ascii=False) + "\n"
+                continue
+            if item is done:
+                break
+            yield json.dumps(item, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 @app.get("/health")

@@ -111,6 +111,9 @@ class StarCoderGUI:
         self._pending_approval_timeout = 30
         self._approval_dialog = None
         self._always_approve = bool(self._layout.get("always_approve", False))
+        self._cancel_requested = False
+        self._busy_mode = ""
+        self._active_stream_response = None
 
         # 에이전트 모드
         self._agent_mode = False
@@ -250,6 +253,19 @@ class StarCoderGUI:
             state=tk.DISABLED,
         )
         self.approve_btn.pack(side=tk.LEFT, padx=(8, 4))
+
+        self.cancel_btn = tk.Button(
+            bar, text="취소", command=self._cancel_current_job,
+            bg="#4d1f1f", fg=RED, relief=tk.FLAT,
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            state=tk.DISABLED,
+        )
+        self.cancel_btn.pack(side=tk.LEFT, padx=(4, 4))
+
+        self.status_bar = tk.Label(
+            bar, text="대기 중", fg=MUTED, bg=PANEL_BG, font=("Segoe UI", 9, "bold")
+        )
+        self.status_bar.pack(side=tk.LEFT, padx=(12, 0))
 
         # 오른쪽: 파라미터 + 초기화
         tk.Button(bar, text="대화 초기화", command=self._clear_history,
@@ -652,11 +668,14 @@ class StarCoderGUI:
         prompt = self._build_prompt_with_context(prompt)
 
         self._sending = True
+        self._cancel_requested = False
         self.send_btn.config(state=tk.DISABLED, text="생성 중...")
         self.approve_btn.config(state=tk.DISABLED)
+        self.cancel_btn.config(state=tk.NORMAL)
         self._pending_approval_command = ""
         self._set_text(self.copy_box, "")
         self.elapsed_lbl.config(text="")
+        self.status_bar.config(text="요청 전송 중")
 
         # 생성 중 표시
         self.result_box.config(state=tk.NORMAL)
@@ -669,6 +688,8 @@ class StarCoderGUI:
             self.result_box.insert(tk.END, "⏳ 생성 중입니다...\n", "normal")
         self.result_box.config(state=tk.DISABLED)
         self.result_box.see(tk.END)
+        self._begin_busy_indicator("승인 명령 실행 중")
+        self._begin_busy_indicator("요청 전송 중")
 
         if self._agent_mode:
             threading.Thread(target=self._run_agent, args=(prompt,), daemon=True).start()
@@ -683,20 +704,40 @@ class StarCoderGUI:
                 "temperature": self.temperature.get(),
                 "max_tokens": self.max_tokens.get(),
             }
-            r = requests.post(f"{API_URL}/chat", json=payload, timeout=180)
-            r.raise_for_status()
-            data = r.json()
-            response = data.get("response", "")
-            elapsed  = data.get("elapsed_ms", 0)
-
-            self.history.append({"role": "user",      "content": prompt})
-            self.history.append({"role": "assistant", "content": response})
-
-            code = self._extract_code(response)
-            self.root.after(0, lambda: self._on_response(response, code, elapsed))
+            response_parts = []
+            self.root.after(0, lambda: self._chat_stream_begin(prompt))
+            with requests.post(f"{API_URL}/chat/stream", json=payload, stream=True, timeout=(10, 600)) as r:
+                self._active_stream_response = r
+                r.raise_for_status()
+                elapsed = 0
+                for raw in r.iter_lines(decode_unicode=True):
+                    if self._cancel_requested:
+                        break
+                    if not raw:
+                        continue
+                    try:
+                        evt = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    t = evt.get("type")
+                    if t == "token":
+                        token = evt.get("text", "")
+                        response_parts.append(token)
+                        self.root.after(0, lambda tok=token: self._chat_stream_token(tok))
+                    elif t == "heartbeat":
+                        self.root.after(0, self._chat_stream_heartbeat)
+                    elif t == "final":
+                        response = evt.get("response", "".join(response_parts))
+                        elapsed = evt.get("elapsed_ms", 0)
+                        self.root.after(0, lambda resp=response, el=elapsed: self._chat_stream_final(resp, el))
+                        break
+                    elif t == "error":
+                        self.root.after(0, lambda m=evt.get("error", "error"): self._on_error(m))
+                        break
         except Exception as e:
             self.root.after(0, lambda err=str(e): self._on_error(err))
         finally:
+            self._active_stream_response = None
             self.root.after(0, self._done_sending)
 
     def _run_agent(self, prompt: str):
@@ -752,6 +793,61 @@ class StarCoderGUI:
             self.root.after(0, lambda err=str(e): self._on_error(err))
         finally:
             self.root.after(0, self._done_sending)
+
+    def _begin_busy_indicator(self, label: str):
+        self._busy_label = label
+        self._busy_started_at = time.time()
+        self._busy_tick()
+
+    def _busy_tick(self):
+        if not self._sending:
+            return
+        elapsed = int(time.time() - getattr(self, "_busy_started_at", time.time()))
+        label = getattr(self, "_busy_label", "진행 중")
+        self.elapsed_lbl.config(text=f"{label}... {elapsed}s")
+        self.root.after(1000, self._busy_tick)
+
+    def _chat_stream_begin(self, prompt: str):
+        self.status_bar.config(text="채팅 응답 생성 중")
+        self.result_box.config(state=tk.NORMAL)
+        self.result_box.insert(tk.END, "\nSm_AICoder ▶ ", "ai_header")
+        self.result_box.insert(tk.END, "\n", "normal")
+        self.result_box.config(state=tk.DISABLED)
+
+    def _chat_stream_token(self, token: str):
+        if self._cancel_requested:
+            return
+        self.result_box.config(state=tk.NORMAL)
+        self.result_box.insert(tk.END, token, "normal")
+        self.result_box.config(state=tk.DISABLED)
+        self.result_box.see(tk.END)
+
+    def _chat_stream_heartbeat(self):
+        self.status_bar.config(text=f"채팅 응답 생성 중... {int(time.time() - getattr(self, '_busy_started_at', time.time()))}s")
+
+    def _chat_stream_final(self, response: str, elapsed_ms: int):
+        if self._cancel_requested:
+            return
+        code = self._extract_code(response)
+        self.history.append({"role": "user", "content": self.input_box.get("1.0", tk.END).strip()})
+        self.history.append({"role": "assistant", "content": response})
+        self._append_message("assistant", response)
+        self._set_text(self.copy_box, code)
+        self.elapsed_lbl.config(text=f"{elapsed_ms / 1000:.1f}초")
+        self.status_bar.config(text="완료")
+
+    def _cancel_current_job(self):
+        self._cancel_requested = True
+        stream = self._active_stream_response
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+            self._active_stream_response = None
+        self.status_bar.config(text="취소 요청됨")
+        self.send_btn.config(state=tk.NORMAL, text="전송  (Ctrl+Enter)")
+        self.cancel_btn.config(state=tk.DISABLED)
 
     def _on_response(self, response, code, elapsed_ms):
         # 사용자 질문 추가
@@ -994,11 +1090,19 @@ class StarCoderGUI:
                     "command": command,
                     "timeout": self._pending_approval_timeout,
                 }
-                r = requests.post(f"{API_URL}/agent/approve", json=payload, timeout=180)
+                r = requests.post(f"{API_URL}/agent/approve", json=payload, timeout=(10, 600))
                 r.raise_for_status()
                 data = r.json()
                 result_text = data.get("result", "")
                 self.root.after(0, lambda: self._append_message("assistant", result_text))
+            except requests.exceptions.ReadTimeout:
+                self.root.after(
+                    0,
+                    lambda: self._on_error(
+                        "승인된 명령 실행이 너무 오래 걸립니다. "
+                        "서버 로그를 확인하거나 timeout을 더 늘려야 합니다."
+                    ),
+                )
             except Exception as e:
                 self.root.after(0, lambda err=str(e): self._on_error(err))
 
