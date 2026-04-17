@@ -695,7 +695,7 @@ class StarCoderGUI:
             code = self._extract_code(response)
             self.root.after(0, lambda: self._on_response(response, code, elapsed))
         except Exception as e:
-            self.root.after(0, lambda: self._on_error(str(e)))
+            self.root.after(0, lambda err=str(e): self._on_error(err))
         finally:
             self.root.after(0, self._done_sending)
 
@@ -749,7 +749,7 @@ class StarCoderGUI:
                         self.root.after(0, lambda m=err: self._on_error(m))
 
         except Exception as e:
-            self.root.after(0, lambda: self._on_error(str(e)))
+            self.root.after(0, lambda err=str(e): self._on_error(err))
         finally:
             self.root.after(0, self._done_sending)
 
@@ -1000,7 +1000,7 @@ class StarCoderGUI:
                 result_text = data.get("result", "")
                 self.root.after(0, lambda: self._append_message("assistant", result_text))
             except Exception as e:
-                self.root.after(0, lambda: self._on_error(str(e)))
+                self.root.after(0, lambda err=str(e): self._on_error(err))
 
         threading.Thread(target=worker, daemon=True).start()
 
