@@ -146,7 +146,9 @@ api_server.py:125-166 /generate·/chat에 try/except Exception + traceback.print
 
 
 
-Client에 VS Code처럼 OpenFolder 버튼만들고 파일,폴더 생성하는 버튼을 만들자.
+Client에 VS Code처럼 OpenFolder 버튼만들고 파일,폴더 생성하는 버튼을 만들자. 그리고
+이것을 만드는 이유는 Client 명령창에서 OpenFolder의 폴더의 파일을 읽고 참조해서 명령을 전달하기 위한것이고, 
+사진파일도 넣을 수 있도록 클립보드에서 복사 붙여 넣기 되게수정.
 
 
 

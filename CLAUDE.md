@@ -1,15 +1,18 @@
-# CLAUDE.md — WPSM_AI_CODER (Sm_AICoder)
+# CLAUDE.md for WPSM_AI_CODER (Sm_AICoder)
 
-## Project Purpose
+## 프로젝트 목적
 
-월평동이상목 Sm_AICoder — 자연어 코드 생성 AI 서버 + GUI/CLI 클라이언트.
-StarCoder2(코드 완성 전용)를 대체해 **자연어 지시**로 코드를 요청할 수 있는 환경.
+Sm_AICoder는 로컬 코드 생성 프로젝트입니다.
 
-- 백엔드: llama-cpp-python + GGUF 양자화 모델 (CPU 전용)
-- 기본 모델: Qwen2.5-Coder-7B-Instruct-Q4_K_M (~4.4GB)
-- 다중 턴 대화 히스토리 유지
+- 백엔드: `llama-cpp-python` + GGUF 모델
+- 클라이언트: GUI/CLI
+- 에이전트 루프: `Sm_AIAgent` (선택)
 
-## Environment Setup
+기본 모델:
+
+- `Qwen2.5-Coder-7B-Instruct-Q4_K_M` (약 4.4GB)
+
+## 환경 설정
 
 ```powershell
 python -m venv venv
@@ -17,83 +20,88 @@ venv\Scripts\pip install -r requirements.txt
 venv\Scripts\python.exe server\scripts\download_model.py
 ```
 
-> llama-cpp-python 최신 버전이 MSVC 빌드 실패 시 `pip install llama-cpp-python==0.3.8`
+Windows에서 `llama-cpp-python` 최신 빌드가 실패하면:
 
-## Run Commands
+```powershell
+pip install llama-cpp-python==0.3.8
+```
+
+## 실행 명령어
 
 | 목적 | 명령어 |
 | ---- | ------ |
-| 환경 검증 | `venv\Scripts\python.exe server\scripts\check_env.py` |
+| 환경 점검 | `venv\Scripts\python.exe server\scripts\check_env.py` |
 | 모델 다운로드 | `venv\Scripts\python.exe server\scripts\download_model.py` |
 | 서버 시작 | `.\\start_server.ps1` |
-| GUI 클라이언트 | `.\\start_gui.ps1` |
-| CLI 클라이언트 | `.\\start_client.ps1` |
-| 에이전트 CLI | `.\\start_agent.ps1` |
+| GUI 클라이언트 실행 | `.\\start_gui.ps1` |
+| CLI 클라이언트 실행 | `.\\start_client.ps1` |
+| Agent CLI 실행 | `.\\start_agent.ps1` |
 | 서버 종료 | `.\\stop_server.ps1` |
 
-## Architecture
+## 구조
 
 ```text
 WP_AI_CODER/
 ├── client/
-│   ├── gui_client.py         ← Tkinter GUI 클라이언트 (3패널)
-│   ├── client.py             ← 대화형 CLI 클라이언트
-│   ├── agent_client.py       ← 에이전트 하네스 CLI 클라이언트
-│   ├── make_icon.py          ← EXE 아이콘 생성
-│   └── Sm_AiCoderClient.exe  ← 빌드 결과물
+│   ├── gui_client.py
+│   ├── client.py
+│   ├── agent_client.py
+│   ├── make_icon.py
+│   └── Sm_AiCoderClient.exe
 ├── server/
-│   ├── server.py             ← 백그라운드 서버 런처 (PID 관리)
-│   ├── logs/                 ← 요청 로그 저장
+│   ├── server.py
+│   ├── logs/
 │   └── scripts/
-│       ├── api_server.py     ← FastAPI 서버 (메인), /generate, /chat, /health, 대시보드
-│       ├── download_model.py ← HuggingFace Hub GGUF 모델 다운로드
-│       ├── check_env.py      ← 환경 검증
-│       └── setup_d_drive.ps1 ← D드라이브 설치 보조 스크립트
+│       ├── api_server.py
+│       ├── download_model.py
+│       ├── check_env.py
+│       └── setup_d_drive.ps1
 ├── Sm_AICoder/
-│   └── models/gguf/          ← GGUF 모델 파일
-├── harness/                    ← 에이전트 하네스 프레임워크
-│   ├── agent_loop.py           ← 에이전트 루프 엔진 (탐색→수정→검증)
-│   ├── agent_api.py            ← FastAPI 라우터 (/agent/*)
-│   ├── context_manager.py      ← 컨텍스트 압축/작업 상태 관리
-│   ├── config.py               ← 하네스 설정 관리
-│   ├── harness_config.json     ← 설정 파일
+│   └── models/gguf/
+├── Sm_AIAgent/
+│   ├── agent_loop.py
+│   ├── agent_api.py
+│   ├── context_manager.py
+│   ├── config.py
+│   ├── Sm_AIAgent_config.json
 │   ├── tools/
-│   │   ├── registry.py         ← 도구 레지스트리
-│   │   ├── file_tools.py       ← read_file, list_files, write_file
-│   │   ├── code_tools.py       ← search_code, apply_patch, show_diff
-│   │   └── command_tools.py    ← run_command (화이트리스트 기반)
+│   │   ├── registry.py
+│   │   ├── file_tools.py
+│   │   ├── code_tools.py
+│   │   └── command_tools.py
 │   └── prompts/
-│       └── system_prompt.py    ← 에이전트 시스템 프롬프트/스키마
-├── build_client.ps1            ← GUI 클라이언트 EXE 빌드
-├── start_server.ps1            ← 서버 시작
-├── stop_server.ps1             ← 서버 종료
-├── start_gui.ps1               ← GUI 클라이언트 실행
-├── start_client.ps1            ← CLI 클라이언트 실행
-├── start_agent.ps1             ← 에이전트 CLI 실행
-└── docs/                       ← 설치/사용법/API 문서
+│       └── system_prompt.py
+├── build_client.ps1
+├── start_server.ps1
+├── stop_server.ps1
+├── start_gui.ps1
+├── start_client.ps1
+├── start_agent.ps1
+└── docs/
 ```
 
-## API Endpoints
+## API 엔드포인트
 
 | 엔드포인트 | 메서드 | 설명 |
 | ---------- | ------ | ---- |
-| `/` | GET | 웹 대시보드 |
-| `/health` | GET | 서버/모델 상태 확인 |
-| `/generate` | POST | 단발성 자연어 → 코드 |
-| `/chat` | POST | 다중 턴 대화 (히스토리 포함) |
+| `/` | GET | 대시보드 |
+| `/health` | GET | 서버/모델 상태 |
+| `/generate` | POST | 단일 프롬프트 생성 |
+| `/chat` | POST | 대화형 생성 |
 | `/stats` | GET | 요청 통계 + 최근 이력 |
-| `/logs/download` | GET | 요청 로그 파일 다운로드 |
-| `/agent/run` | POST | 에이전트 루프 실행 (도구 자동 호출) |
-| `/agent/reset` | POST | 에이전트 세션 초기화 |
-| `/agent/sessions` | GET | 활성 에이전트 세션 목록 |
+| `/logs/download` | GET | 요청 로그 다운로드 |
+| `/agent/run` | POST | 에이전트 루프 실행 |
+| `/agent/stream` | POST | 에이전트 스트리밍 실행 (NDJSON) |
+| `/agent/reset` | POST | 세션 초기화 |
+| `/agent/sessions` | GET | 활성 세션 목록 |
 
-## Key Constants (server/scripts/api_server.py)
+## 주요 상수 (`server/scripts/api_server.py`)
 
-- `N_CTX = 4096` — 컨텍스트 길이
-- `N_THREADS = 8` — CPU 스레드 수
-- `N_GPU_LAYERS = 0` — CPU 전용
+- `N_CTX = 8192`
+- `N_THREADS = 8`
+- `N_GPU_LAYERS = 0`
 - `PORT = 8888`
 
-## Repository
+## 저장소
 
 - GitHub: `mokguylee-prog/WPSM_AI_CODER`

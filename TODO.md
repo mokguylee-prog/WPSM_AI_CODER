@@ -26,3 +26,17 @@
 - [x] GitHub에 WPSM_AI_CODER 리포지토리 생성
 - [x] 새 리포지토리로 push 완료
   - Remote: <https://github.com/mokguylee-prog/WPSM_AI_CODER>
+
+## 3. Client OpenFolder / Paste / Preview
+
+- [x] GUI Client에 OpenFolder 버튼 추가
+- [x] 선택 폴더 기준 파일/폴더 생성 기능 추가
+- [x] 폴더 트리를 VS Code처럼 접기/펼치기 가능하게 개선
+- [x] 선택 폴더의 파일 내용을 프롬프트에 참조하도록 연결
+- [x] 클립보드 이미지 붙여넣기 지원 추가
+- [x] 이미지 미리보기 패널 추가
+- [x] Pillow 의존성 추가
+- [x] 현재 세션 내용 문서화
+  - [x] Sm_AICoder_dialog/DiagStarCoder_20260418000000.md
+- [x] 에이전트 파일 반영 강제 확인
+  - [x] Sm_AICoder_dialog/DiagStarCoder_20260418010000.md

@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import scrolledtext, messagebox
+from tkinter import scrolledtext, messagebox, filedialog, simpledialog, ttk
 import requests
 import threading
 import subprocess
@@ -10,6 +10,14 @@ import json
 import sys
 import time
 import ctypes
+from pathlib import Path
+
+try:
+    from PIL import ImageGrab, Image, ImageTk
+except Exception:
+    ImageGrab = None
+    Image = None
+    ImageTk = None
 
 API_URL = "http://localhost:8888"
 APP_ID = "sm.aicoder.client"
@@ -94,6 +102,15 @@ class StarCoderGUI:
         self.max_tokens  = tk.IntVar(value=1024)
         self._sending    = False
         self._layout     = self._load_layout()
+        self._open_folder = self._layout.get("open_folder", PROJECT_ROOT)
+        self._attachments = []
+        self._folder_rows = []
+        self._tree_nodes = {}
+        self._preview_image = None
+        self._pending_approval_command = ""
+        self._pending_approval_timeout = 30
+        self._approval_dialog = None
+        self._always_approve = bool(self._layout.get("always_approve", False))
 
         # 에이전트 모드
         self._agent_mode = False
@@ -120,13 +137,20 @@ class StarCoderGUI:
             # 필수 키 없으면 기본값으로 보완
             for k, v in DEFAULT_LAYOUT.items():
                 data.setdefault(k, v)
+            data.setdefault("open_folder", PROJECT_ROOT)
+            data.setdefault("always_approve", False)
             return data
         except Exception:
-            return dict(DEFAULT_LAYOUT)
+            data = dict(DEFAULT_LAYOUT)
+            data["open_folder"] = PROJECT_ROOT
+            data["always_approve"] = False
+            return data
 
     def _save_layout(self):
         try:
             self._layout["geometry"] = self.root.winfo_geometry()
+            self._layout["open_folder"] = self._open_folder or PROJECT_ROOT
+            self._layout["always_approve"] = self._always_approve
             with open(LAYOUT_FILE, "w", encoding="utf-8") as f:
                 json.dump(self._layout, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -219,6 +243,14 @@ class StarCoderGUI:
         )
         self.mode_indicator.pack(side=tk.LEFT, padx=(0, 4))
 
+        self.approve_btn = tk.Button(
+            bar, text="허용", command=self._approve_pending_command,
+            bg="#1f4d2e", fg=GREEN, relief=tk.FLAT,
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            state=tk.DISABLED,
+        )
+        self.approve_btn.pack(side=tk.LEFT, padx=(8, 4))
+
         # 오른쪽: 파라미터 + 초기화
         tk.Button(bar, text="대화 초기화", command=self._clear_history,
                   bg=INPUT_BG, fg=MUTED, relief=tk.FLAT,
@@ -257,15 +289,144 @@ class StarCoderGUI:
         self._outer.add(self._top_pane, minsize=200)
         self._top_pane.bind("<ButtonRelease-1>", self._on_h_sash)
 
-        self._build_input_panel(self._top_pane)
+        self._build_folder_panel(self._top_pane)
+        self._build_editor_panel(self._top_pane)
         self._build_copy_panel(self._top_pane)
 
         self._build_result_panel(self._outer)
+        self._build_command_panel(self._outer)
 
         # 렌더 완료 후 sash 비율 적용
         self.root.after(200, self._apply_sash)
 
     # ── Panel 1: 명령 입력 ──────────────────
+    def _build_folder_panel(self, parent):
+        frame = tk.Frame(parent, bg=PANEL_BG)
+        parent.add(frame, minsize=240)
+
+        hdr = tk.Frame(frame, bg=PANEL_BG)
+        hdr.pack(fill=tk.X, padx=8)
+        self._section_label(hdr, "OpenFolder", side=tk.LEFT)
+
+        tk.Button(
+            hdr, text="Open Folder", command=self._open_folder_dialog,
+            bg=INPUT_BG, fg=BLUE, relief=tk.FLAT,
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+        ).pack(side=tk.RIGHT, pady=6)
+
+        btn_row = tk.Frame(frame, bg=PANEL_BG)
+        btn_row.pack(fill=tk.X, padx=8, pady=(2, 6))
+
+        tk.Button(
+            btn_row, text="New File", command=self._create_file,
+            bg=INPUT_BG, fg=GREEN, relief=tk.FLAT,
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        tk.Button(
+            btn_row, text="New Folder", command=self._create_folder,
+            bg=INPUT_BG, fg=GREEN, relief=tk.FLAT,
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+        ).pack(side=tk.LEFT)
+
+        self.folder_path_lbl = tk.Label(
+            frame, text=self._open_folder, fg=MUTED, bg=PANEL_BG,
+            font=("Segoe UI", 8), wraplength=220, justify=tk.LEFT,
+        )
+        self.folder_path_lbl.pack(anchor=tk.W, padx=10, pady=(0, 4))
+
+        tree_frame = tk.Frame(frame, bg=PANEL_BG)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
+
+        self.folder_tree = ttk.Treeview(tree_frame, show="tree", selectmode="browse")
+        tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.folder_tree.yview)
+        self.folder_tree.configure(yscrollcommand=tree_scroll.set)
+        self.folder_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.folder_tree.bind("<<TreeviewOpen>>", self._on_tree_open)
+        self.folder_tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+
+        preview = tk.Frame(frame, bg=PANEL_BG)
+        preview.pack(fill=tk.X, padx=8, pady=(0, 8))
+        tk.Label(preview, text="Preview", fg=BLUE, bg=PANEL_BG, font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+        self.preview_image_lbl = tk.Label(preview, bg=DARK_BG, width=32, height=10)
+        self.preview_image_lbl.pack(fill=tk.X, pady=(4, 4))
+        self.preview_text_lbl = tk.Label(preview, text="No selection", fg=MUTED, bg=PANEL_BG,
+                                         wraplength=220, justify=tk.LEFT, font=("Segoe UI", 8))
+        self.preview_text_lbl.pack(anchor=tk.W)
+        self._refresh_folder_view()
+
+    def _build_editor_panel(self, parent):
+        frame = tk.Frame(parent, bg=PANEL_BG)
+        parent.add(frame, minsize=200)
+
+        self._section_label(frame, "File Editor")
+
+        top_row = tk.Frame(frame, bg=PANEL_BG, pady=6, padx=8)
+        top_row.pack(side=tk.TOP, fill=tk.X)
+
+        self.file_path_lbl = tk.Label(
+            top_row, text="No file selected", fg=MUTED, bg=PANEL_BG,
+            font=("Segoe UI", 8), wraplength=220, justify=tk.LEFT,
+        )
+        self.file_path_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tk.Button(
+            top_row, text="Save File", command=self._save_selected_file,
+            bg=INPUT_BG, fg=GREEN, relief=tk.FLAT,
+            font=("Segoe UI", 9), padx=10, pady=4, cursor="hand2",
+        ).pack(side=tk.RIGHT)
+
+        self.editor_box = tk.Text(
+            frame, bg=INPUT_BG, fg=TEXT, insertbackground=TEXT,
+            relief=tk.FLAT, font=("Consolas", 11), wrap=tk.WORD,
+            padx=10, pady=10, undo=True,
+        )
+        self.editor_box.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
+        self.editor_box.bind("<Control-s>", self._save_selected_file)
+
+        self._selected_file_path = ""
+
+    def _build_command_panel(self, parent):
+        frame = tk.Frame(parent, bg=PANEL_BG)
+        parent.add(frame, minsize=180)
+
+        self._section_label(frame, "Command Input")
+
+        btn_row = tk.Frame(frame, bg=PANEL_BG, pady=6, padx=8)
+        btn_row.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self.send_btn = tk.Button(
+            btn_row, text="전송  (Ctrl+Enter)", command=self._send,
+            bg=BLUE, fg=DARK_BG, relief=tk.FLAT,
+            font=("Segoe UI", 10, "bold"), padx=14, pady=6,
+            cursor="hand2",
+        )
+        self.send_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Button(
+            btn_row, text="Clear",
+            command=lambda: self.input_box.delete("1.0", tk.END),
+            bg=INPUT_BG, fg=MUTED, relief=tk.FLAT,
+            font=("Segoe UI", 9), padx=10, pady=6, cursor="hand2",
+        ).pack(side=tk.LEFT)
+
+        self.turn_lbl = tk.Label(btn_row, text="대화: 0턴",
+                                 fg=MUTED, bg=PANEL_BG,
+                                 font=("Segoe UI", 9))
+        self.turn_lbl.pack(side=tk.RIGHT)
+
+        self.input_box = tk.Text(
+            frame, bg=INPUT_BG, fg=TEXT, insertbackground=TEXT,
+            relief=tk.FLAT, font=("Consolas", 11), wrap=tk.WORD,
+            padx=10, pady=10, undo=True,
+        )
+        self.input_box.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
+        self.input_box.bind("<Control-Return>", lambda e: self._send())
+        self.input_box.bind("<Control-v>", self._paste_from_clipboard)
+        self.input_box.bind("<Control-V>", self._paste_from_clipboard)
+        self.input_box.bind("<<Paste>>", self._paste_from_clipboard)
+
     def _build_input_panel(self, parent):
         frame = tk.Frame(parent, bg=PANEL_BG)
         parent.add(frame, minsize=200)
@@ -303,6 +464,9 @@ class StarCoderGUI:
         )
         self.input_box.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
         self.input_box.bind("<Control-Return>", lambda e: self._send())
+        self.input_box.bind("<Control-v>", self._paste_from_clipboard)
+        self.input_box.bind("<Control-V>", self._paste_from_clipboard)
+        self.input_box.bind("<<Paste>>", self._paste_from_clipboard)
 
     # ── Panel 2: 응답 ─────────────────────
     def _build_copy_panel(self, parent):
@@ -485,9 +649,12 @@ class StarCoderGUI:
         prompt = self.input_box.get("1.0", tk.END).strip()
         if not prompt:
             return
+        prompt = self._build_prompt_with_context(prompt)
 
         self._sending = True
         self.send_btn.config(state=tk.DISABLED, text="생성 중...")
+        self.approve_btn.config(state=tk.DISABLED)
+        self._pending_approval_command = ""
         self._set_text(self.copy_box, "")
         self.elapsed_lbl.config(text="")
 
@@ -538,7 +705,7 @@ class StarCoderGUI:
             payload = {
                 "message": prompt,
                 "session_id": self._agent_session_id,
-                "working_dir": PROJECT_ROOT,
+                "working_dir": self._open_folder or PROJECT_ROOT,
                 "max_iterations": 15,
                 "temperature": self.temperature.get(),
                 "max_tokens": self.max_tokens.get(),
@@ -692,6 +859,19 @@ class StarCoderGUI:
             self.result_box.insert(tk.END, f"      [{status}] ", tag)
             self.result_box.insert(tk.END, f"{result}\n", "agent_step")
 
+        elif step_type == "approval_required":
+            cmd = step.get("command", "")
+            msg = step.get("message", "Permission approval required")
+            self._pending_approval_command = cmd
+            self._pending_approval_timeout = int(step.get("timeout", 30) or 30)
+            if self._always_approve:
+                self.root.after(0, self._approve_pending_command)
+            else:
+                self.root.after(0, lambda c=cmd, m=msg: self._show_approval_dialog(c, m))
+            self.result_box.insert(tk.END, "      [APPROVAL REQUIRED] ", "agent_fail")
+            self.result_box.insert(tk.END, f"{cmd}\n", "agent_step")
+            self.result_box.insert(tk.END, f"      {msg}\n", "agent_fail")
+
         elif step_type == "parse_error":
             self.result_box.insert(tk.END, "      ", "agent_step")
             self.result_box.insert(tk.END, "JSON 파싱 실패 — 재시도\n", "agent_fail")
@@ -711,14 +891,365 @@ class StarCoderGUI:
         self._sending = False
         self.send_btn.config(state=tk.NORMAL, text="전송  (Ctrl+Enter)")
 
+    def _show_approval_dialog(self, command: str, message: str):
+        if self._approval_dialog is not None and self._approval_dialog.winfo_exists():
+            try:
+                self._approval_dialog.lift()
+                self._approval_dialog.focus_force()
+                return
+            except Exception:
+                self._approval_dialog = None
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Command Approval")
+        dlg.configure(bg=PANEL_BG)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+        self._approval_dialog = dlg
+
+        tk.Label(dlg, text="권한이 필요한 명령이 차단되었습니다.", fg=BLUE, bg=PANEL_BG,
+                 font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, padx=16, pady=(14, 6))
+        tk.Label(dlg, text=message, fg=TEXT, bg=PANEL_BG, wraplength=520,
+                 justify=tk.LEFT, font=("Segoe UI", 9)).pack(anchor=tk.W, padx=16, pady=(0, 10))
+        tk.Label(dlg, text="명령", fg=MUTED, bg=PANEL_BG, font=("Segoe UI", 8)).pack(anchor=tk.W, padx=16)
+
+        cmd_box = tk.Text(
+            dlg, height=5, width=72, bg=INPUT_BG, fg=TEXT, insertbackground=TEXT,
+            relief=tk.FLAT, font=("Consolas", 9), wrap=tk.WORD,
+        )
+        cmd_box.pack(fill=tk.BOTH, expand=True, padx=16, pady=(4, 12))
+        cmd_box.insert("1.0", command)
+        cmd_box.config(state=tk.DISABLED)
+
+        always_var = tk.BooleanVar(value=self._always_approve)
+        chk = tk.Checkbutton(
+            dlg,
+            text="항상 승인",
+            variable=always_var,
+            onvalue=True,
+            offvalue=False,
+            bg=PANEL_BG,
+            fg=TEXT,
+            selectcolor=PANEL_BG,
+            activebackground=PANEL_BG,
+            activeforeground=TEXT,
+            font=("Segoe UI", 9),
+        )
+        chk.pack(anchor=tk.W, padx=14, pady=(0, 10))
+
+        btn_row = tk.Frame(dlg, bg=PANEL_BG)
+        btn_row.pack(fill=tk.X, padx=16, pady=(0, 14))
+
+        tk.Button(
+            btn_row, text="거부", command=lambda: self._close_approval_dialog(False),
+            bg=INPUT_BG, fg=MUTED, relief=tk.FLAT, font=("Segoe UI", 9), padx=12, pady=4,
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Button(
+            btn_row, text="허용", command=lambda: self._close_approval_dialog(True, always_var.get()),
+            bg="#1f4d2e", fg=GREEN, relief=tk.FLAT, font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+        ).pack(side=tk.RIGHT)
+
+        dlg.protocol("WM_DELETE_WINDOW", lambda: self._close_approval_dialog(False, always_var.get()))
+        dlg.update_idletasks()
+        x = self.root.winfo_rootx() + 80
+        y = self.root.winfo_rooty() + 80
+        dlg.geometry(f"+{x}+{y}")
+
+    def _close_approval_dialog(self, approved: bool, always_approve: bool = False):
+        dlg = self._approval_dialog
+        if dlg is not None and dlg.winfo_exists():
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+        self._approval_dialog = None
+
+        if approved:
+            self._always_approve = bool(always_approve)
+            self._save_layout()
+            self._approve_pending_command()
+        else:
+            self._pending_approval_command = ""
+            self.approve_btn.config(state=tk.DISABLED)
+
+    def _approve_pending_command(self):
+        command = self._pending_approval_command.strip()
+        if not command:
+            return
+
+        self.approve_btn.config(state=tk.DISABLED)
+        self._pending_approval_command = ""
+
+        self.result_box.config(state=tk.NORMAL)
+        self.result_box.insert(tk.END, f"\n[허용] {command}\n", "agent_ok")
+        self.result_box.config(state=tk.DISABLED)
+        self.result_box.see(tk.END)
+
+        def worker():
+            try:
+                payload = {
+                    "session_id": self._agent_session_id,
+                    "command": command,
+                    "timeout": self._pending_approval_timeout,
+                }
+                r = requests.post(f"{API_URL}/agent/approve", json=payload, timeout=180)
+                r.raise_for_status()
+                data = r.json()
+                result_text = data.get("result", "")
+                self.root.after(0, lambda: self._append_message("assistant", result_text))
+            except Exception as e:
+                self.root.after(0, lambda: self._on_error(str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _copy_code(self):
         text = self.copy_box.get("1.0", tk.END).strip()
         if not text:
             return
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        self.copy_btn.config(text="복사됨 ✓")
-        self.root.after(2000, lambda: self.copy_btn.config(text="클립보드 복사"))
+        self.copy_btn.config(text="Copied")
+        self.root.after(2000, lambda: self.copy_btn.config(text="Copy Code"))
+
+    def _open_folder_dialog(self):
+        folder = filedialog.askdirectory(initialdir=self._open_folder or PROJECT_ROOT, title="Open Folder")
+        if not folder:
+            return
+        self._open_folder = os.path.abspath(folder)
+        self.folder_path_lbl.config(text=self._open_folder)
+        self._refresh_folder_view()
+        self._save_layout()
+
+    def _create_file(self):
+        base = self._open_folder or PROJECT_ROOT
+        name = simpledialog.askstring("New File", "File name relative to OpenFolder:", parent=self.root)
+        if not name:
+            return
+        target = os.path.abspath(os.path.join(base, name))
+        if not target.startswith(os.path.abspath(base)):
+            messagebox.showerror("Invalid Path", "File must be inside OpenFolder.")
+            return
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if not os.path.exists(target):
+            with open(target, "w", encoding="utf-8") as f:
+                f.write("")
+        self._refresh_folder_view()
+
+    def _create_folder(self):
+        base = self._open_folder or PROJECT_ROOT
+        name = simpledialog.askstring("New Folder", "Folder name relative to OpenFolder:", parent=self.root)
+        if not name:
+            return
+        target = os.path.abspath(os.path.join(base, name))
+        if not target.startswith(os.path.abspath(base)):
+            messagebox.showerror("Invalid Path", "Folder must be inside OpenFolder.")
+            return
+        os.makedirs(target, exist_ok=True)
+        self._refresh_folder_view()
+
+    def _refresh_folder_view(self):
+        if not hasattr(self, "folder_tree"):
+            return
+        base = self._open_folder or PROJECT_ROOT
+        self.folder_path_lbl.config(text=base)
+        self.folder_tree.delete(*self.folder_tree.get_children())
+        self._folder_rows = []
+        self._tree_nodes = {}
+        try:
+            self._insert_tree_node("", base, base, 0, max_depth=4)
+        except Exception as e:
+            self.preview_text_lbl.config(text=f"Error: {e}")
+
+    def _insert_tree_node(self, parent_id: str, path: str, base: str, depth: int, max_depth: int = 4):
+        if depth > max_depth:
+            return
+        try:
+            entries = sorted(os.listdir(path), key=lambda p: (not os.path.isdir(os.path.join(path, p)), p.lower()))
+        except Exception:
+            entries = []
+        ignore = {".git", "__pycache__", "venv", "node_modules", ".sm_aicoder_assets"}
+        for name in entries:
+            if name in ignore:
+                continue
+            full = os.path.join(path, name)
+            rel = os.path.relpath(full, base)
+            node_id = self.folder_tree.insert(parent_id, tk.END, text=name, open=False)
+            self._tree_nodes[node_id] = full
+            self._folder_rows.append(full)
+            if os.path.isdir(full):
+                if depth < max_depth:
+                    self.folder_tree.insert(node_id, tk.END, text="loading")
+            else:
+                pass
+
+    def _on_tree_open(self, event=None):
+        node = self.folder_tree.focus()
+        path = self._tree_nodes.get(node)
+        if not path or not os.path.isdir(path):
+            return
+        children = self.folder_tree.get_children(node)
+        if len(children) == 1 and self.folder_tree.item(children[0], "text") == "loading":
+            self.folder_tree.delete(children[0])
+            self._insert_tree_node(node, path, self._open_folder or PROJECT_ROOT, self._tree_depth(node) + 1)
+
+    def _tree_depth(self, node_id: str) -> int:
+        depth = 0
+        while True:
+            parent = self.folder_tree.parent(node_id)
+            if not parent:
+                return depth
+            depth += 1
+            node_id = parent
+
+    def _on_tree_select(self, event=None):
+        sel = self.folder_tree.focus()
+        path = self._tree_nodes.get(sel)
+        if not path:
+            return
+        self._update_preview(path)
+        if os.path.isfile(path):
+            self._load_attachment_from_file(path)
+            self._load_file_into_editor(path)
+
+    def _load_attachment_from_file(self, path: str):
+        if path in self._attachments:
+            self._update_preview(path)
+            return
+        self._attachments.append(path)
+        self.copy_btn.config(text=f"Attached {len(self._attachments)}")
+        self._set_text(self.copy_box, "\n".join(self._attachments))
+        self._update_preview(path)
+
+    def _load_file_into_editor(self, path: str):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            self._selected_file_path = path
+            self.file_path_lbl.config(text=path)
+            self.editor_box.delete("1.0", tk.END)
+            self.editor_box.insert("1.0", content)
+        except Exception as e:
+            self.file_path_lbl.config(text=f"Failed to load: {e}")
+
+    def _save_selected_file(self, event=None):
+        path = self._selected_file_path
+        if not path:
+            messagebox.showwarning("No file", "Select a file from OpenFolder first.")
+            return "break" if event is not None else None
+        try:
+            content = self.editor_box.get("1.0", tk.END)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content.rstrip("\n") + "\n")
+            self.file_path_lbl.config(text=path)
+            self._refresh_folder_view()
+            self._update_preview(path)
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+        return "break" if event is not None else None
+
+    def _update_preview(self, path: str):
+        if os.path.isdir(path):
+            try:
+                count = len(os.listdir(path))
+            except Exception:
+                count = 0
+            self.preview_image_lbl.config(image="", text="")
+            self.preview_text_lbl.config(text=f"Folder: {path}\nItems: {count}")
+            return
+
+        ext = os.path.splitext(path)[1].lower()
+        if ext in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"} and Image is not None and ImageTk is not None:
+            try:
+                img = Image.open(path)
+                img.thumbnail((260, 160))
+                self._preview_image = ImageTk.PhotoImage(img)
+                self.preview_image_lbl.config(image=self._preview_image, text="")
+                self.preview_text_lbl.config(text=os.path.basename(path))
+                return
+            except Exception:
+                pass
+
+        self.preview_image_lbl.config(image="", text="")
+        info = self._read_file_summary(path)
+        self.preview_text_lbl.config(text=info)
+
+    def _paste_from_clipboard(self, event=None):
+        if ImageGrab is None:
+            return
+        try:
+            data = ImageGrab.grabclipboard()
+        except Exception:
+            return
+
+        if isinstance(data, list):
+            for path in data:
+                if os.path.isfile(path):
+                    self._load_attachment_from_file(path)
+            return "break"
+
+        if hasattr(data, "save"):
+            base = self._open_folder or PROJECT_ROOT
+            assets = os.path.join(base, ".sm_aicoder_assets")
+            os.makedirs(assets, exist_ok=True)
+            filename = f"pasted_{int(time.time())}.png"
+            target = os.path.join(assets, filename)
+            data.save(target, "PNG")
+            self._load_attachment_from_file(target)
+            messagebox.showinfo("Pasted Image", f"Clipboard image saved to:\n{target}")
+            return "break"
+
+        return None
+
+    def _read_file_summary(self, path: str) -> str:
+        try:
+            size = os.path.getsize(path)
+            ext = os.path.splitext(path)[1].lower() or "no ext"
+            if size > 50_000:
+                return f"{os.path.basename(path)}\n{ext}\n{size} bytes\nToo large to preview"
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.read().splitlines()
+            head = lines[:8]
+            text = "\n".join(head)
+            if len(lines) > 8:
+                text += "\n..."
+            return f"{os.path.basename(path)}\n{ext}\n{size} bytes\n\n{text}".strip()
+        except Exception as e:
+            return f"{os.path.basename(path)}\nPreview unavailable: {e}"
+
+    def _build_prompt_with_context(self, prompt: str) -> str:
+        base = self._open_folder or PROJECT_ROOT
+        lines = [f"[OpenFolder] {base}", "[Folder files]"]
+        for row in self._folder_rows[:200]:
+            try:
+                rel = os.path.relpath(row, base)
+            except Exception:
+                rel = row
+            lines.append(f"- {rel}")
+        lines.append("")
+        if self._selected_file_path:
+            lines.append(f"[Selected file] {self._selected_file_path}")
+            try:
+                editor_text = self.editor_box.get("1.0", tk.END).rstrip()
+            except Exception:
+                editor_text = ""
+            if editor_text:
+                lines.append("[Selected file content]")
+                lines.append(editor_text)
+                lines.append("")
+        lines.append("[Folder summaries]")
+        for path in self._folder_rows[:12]:
+            if os.path.isfile(path):
+                lines.append(self._read_file_summary(path))
+                lines.append("")
+        if self._attachments:
+            lines.append("[Attachments]")
+            lines.extend(f"- {p}" for p in self._attachments)
+        lines.append("")
+        lines.append(prompt)
+        return "\n".join(lines)
 
     def _toggle_mode(self):
         """채팅 모드 ↔ 에이전트 모드 전환"""
