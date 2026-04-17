@@ -298,7 +298,7 @@ Keep explanations concise unless asked for details.
 | `N_CTX` | `4096` | 컨텍스트 길이 (토큰) |
 | `N_THREADS` | `8` | CPU 스레드 수 |
 | `N_GPU_LAYERS` | `0` | GPU 오프로드 레이어 (CPU 전용) |
-| `MODEL_DIR` | `models/gguf` (상대경로) | GGUF 파일 탐색 경로 |
+| `MODEL_DIR` | `Sm_AICoder/models/gguf` | GGUF 파일 탐색 경로 |
 | `LOG_FILE` | `logs/requests.log` | 요청 로그 저장 경로 |
 | `recent_requests` | 최대 20건 | 메모리 내 최근 요청 보관 수 |
 

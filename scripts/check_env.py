@@ -27,7 +27,7 @@ except ImportError:
     print("requests: 미설치")
 
 # 모델 파일 확인
-MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "gguf")
+MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Sm_AICoder", "models", "gguf")
 if os.path.isdir(MODEL_DIR):
     files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".gguf")]
     if files:

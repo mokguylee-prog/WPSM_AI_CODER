@@ -17,10 +17,12 @@
   - [x] CLAUDE.md
   - [x] docs/API_SPEC.md
   - [x] install.md, docs/install.md
+- [x] .gitignore EXE 예외명 변경
 
 ## 2. GitHub 리포지토리 이전: WPSM_AI_CODER
 
-- [ ] 기존 git 이력 제거 (.git 삭제)
-- [ ] 새 git 저장소 초기화
-- [ ] GitHub에 WPSM_AI_CODER 리포지토리 생성
-- [ ] 새 리포지토리로 push
+- [x] 기존 git 이력 제거 (.git 삭제)
+- [x] 새 git 저장소 초기화 (git init, main 브랜치)
+- [x] GitHub에 WPSM_AI_CODER 리포지토리 생성
+- [x] 새 리포지토리로 push 완료
+  - Remote: https://github.com/mokguylee-prog/WPSM_AI_CODER

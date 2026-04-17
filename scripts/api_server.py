@@ -19,7 +19,7 @@ except ImportError as e:
 
 # ── 설정 ──────────────────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR  = os.path.join(BASE_DIR, "models", "gguf")
+MODEL_DIR  = os.path.join(BASE_DIR, "Sm_AICoder", "models", "gguf")
 LOG_DIR    = os.path.join(BASE_DIR, "logs")
 LOG_FILE  = os.path.join(LOG_DIR, f"requests_{datetime.now().strftime('%Y%m%d%H%M%S')}.log")
 PORT = 8888

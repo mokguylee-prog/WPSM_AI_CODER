@@ -33,7 +33,7 @@ server_err.log
 *.gguf
 *.bin
 *.safetensors
-models/
+Sm_AICoder/models/
 
 # ── Claude 내부 메모리 ────────────────────
 memory/

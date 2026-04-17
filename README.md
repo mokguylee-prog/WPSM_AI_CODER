@@ -172,9 +172,9 @@ Sm_AICoder/
 | 항목 | 값 |
 |------|----|
 | 기본 모델 | `qwen2.5-coder-7b-instruct-q4_k_m.gguf` |
-| 모델 경로 | `models/gguf/` (프로젝트 상대경로) |
+| 모델 경로 | `Sm_AICoder/models/gguf/` |
 | 컨텍스트 길이 | 4096 토큰 |
 | CPU 스레드 | 8 (조정 가능) |
 | GPU 레이어 | 0 (CPU 전용) |
 
-서버 시작 시 `models/gguf/` 폴더에서 가장 큰 `.gguf` 파일을 자동 선택합니다.
+서버 시작 시 `Sm_AICoder/models/gguf/` 폴더에서 가장 큰 `.gguf` 파일을 자동 선택합니다.

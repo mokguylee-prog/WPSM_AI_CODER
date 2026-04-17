@@ -51,7 +51,7 @@ server.py              ← 백그라운드 런처 (PID 관리)
 
 ## Model Directory
 
-GGUF 파일 위치: `models/gguf/*.gguf` (프로젝트 상대경로)
+GGUF 파일 위치: `Sm_AICoder/models/gguf/*.gguf`
 서버가 자동으로 가장 큰 .gguf 파일을 선택한다.
 
 ## Key Constants

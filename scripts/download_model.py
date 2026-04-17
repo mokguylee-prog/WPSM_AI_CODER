@@ -22,7 +22,7 @@ MODELS = {
     },
 }
 
-SAVE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "gguf")
+SAVE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Sm_AICoder", "models", "gguf")
 DEFAULT_MODEL = "qwen2.5-coder-7b"
 
 
