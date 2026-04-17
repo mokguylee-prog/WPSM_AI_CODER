@@ -20,9 +20,9 @@ where python
 #   C:\Users\kadelee\AppData\Local\Microsoft\WindowsApps\python.exe
 
 # 기존 환경 확인 (모두 없음)
-ls D:/Sm_AICoder/venv/Scripts/python.exe   # -> 없음 (D:/Sm_AICoder 자체가 없음)
-ls D:/Sm_AICoder/models/gguf/*.gguf        # -> 없음
-pip list | grep -iE "llama|fastapi|uvicorn|pydantic"  # -> 미설치
+ls D:/WP_AI_CODER/venv/Scripts/python.exe              # -> 없음
+ls D:/WP_AI_CODER/Sm_AICoder/models/gguf/*.gguf        # -> 없음
+pip list | grep -iE "llama|fastapi|uvicorn|pydantic"    # -> 미설치
 ```
 
 ---
@@ -80,37 +80,37 @@ venv/Scripts/pip.exe install fastapi uvicorn pydantic requests huggingface_hub
 
 ---
 
-## 4단계: 경로 수정 (D:/Sm_AICoder -> 프로젝트 상대경로)
+## 4단계: 경로 수정 (D:/StarCoder3 -> 프로젝트 상대경로)
 
-원래 코드가 `D:/Sm_AICoder`으로 하드코딩되어 있어 현재 위치(`D:/WP_AI_CODER`)에서 동작하도록 수정함.
+원래 코드가 `D:/StarCoder3`으로 하드코딩되어 있어 현재 위치(`D:/WP_AI_CODER`)에서 동작하도록 수정함.
 
 ### 수정된 파일 목록
 
 **scripts/api_server.py**
 ```python
 # 변경 전
-MODEL_DIR = "D:/Sm_AICoder/models/gguf"
+MODEL_DIR = "D:/StarCoder3/models/gguf"
 LOG_DIR   = "logs"
 
 # 변경 후
 BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR  = os.path.join(BASE_DIR, "models", "gguf")
+MODEL_DIR  = os.path.join(BASE_DIR, "Sm_AICoder", "models", "gguf")
 LOG_DIR    = os.path.join(BASE_DIR, "logs")
 ```
 
 **scripts/download_model.py**
 ```python
 # 변경 전
-SAVE_DIR = "D:/Sm_AICoder/models/gguf"
+SAVE_DIR = "D:/StarCoder3/models/gguf"
 
 # 변경 후
-SAVE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "gguf")
+SAVE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Sm_AICoder", "models", "gguf")
 ```
 
 **start_server.ps1 / start_gui.ps1 / start_client.ps1 / build_client.ps1**
 ```powershell
 # 변경 전
-$venv = "D:\Sm_AICoder\venv\Scripts\python.exe"
+$venv = "D:\StarCoder3\venv\Scripts\python.exe"
 if (-not (Test-Path $venv)) { $venv = "python" }
 
 # 변경 후
@@ -122,12 +122,12 @@ if (-not (Test-Path $venv)) { $venv = "python" }
 **CLAUDE.md**
 ```
 # 변경 전
-python -m venv D:\Sm_AICoder\venv
-GGUF 파일 위치: D:/Sm_AICoder/models/gguf/*.gguf
+python -m venv D:\StarCoder3\venv
+GGUF 파일 위치: D:/StarCoder3/models/gguf/*.gguf
 
 # 변경 후
 python -m venv venv
-GGUF 파일 위치: models/gguf/*.gguf (프로젝트 상대경로)
+GGUF 파일 위치: Sm_AICoder/models/gguf/*.gguf (프로젝트 상대경로)
 ```
 
 ---
@@ -138,8 +138,8 @@ GGUF 파일 위치: models/gguf/*.gguf (프로젝트 상대경로)
 cd d:/WP_AI_CODER
 venv/Scripts/python.exe scripts/download_model.py
 # 모델: Qwen2.5-Coder-7B-Instruct Q4_K_M
-# 저장 위치: d:/WP_AI_CODER/models/gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf
-# 용량: ~4.4GB, ��운로드 시간: 네트워크에 따라 5~30분
+# 저장 위치: d:/WP_AI_CODER/Sm_AICoder/models/gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf
+# 용량: ~4.4GB, 다운로드 시간: 네트워크에 따라 5~30분
 ```
 
 ---
@@ -203,8 +203,8 @@ curl http://localhost:8888/stats
 | pip 업그레이드 | OK | pip 26.0.1 |
 | llama-cpp-python 설치 | OK | 0.3.8 (최신은 MSVC 인코딩 에러) |
 | fastapi/uvicorn 등 설치 | OK | 전부 완료 |
-| 경로 수정 (6개 파일) | OK | D:/Sm_AICoder -> 상대경로 |
-| 모델 다운로드 | OK | qwen2.5-coder-7b-instruct-q4_k_m.gguf (4.4GB) |
+| 경로 수정 (6개 파일) | OK | D:/StarCoder3 -> 상대경로 |
+| 모델 다운로드 | OK | Sm_AICoder/models/gguf/ (4.4GB) |
 | 서버 기동 | OK | http://localhost:8888 |
 | 헬스체크 통과 | OK | {"status":"ok","model":"..."} |
 | /generate API | OK | Hello World C 코드 생성 확인 |
@@ -213,25 +213,29 @@ curl http://localhost:8888/stats
 
 ---
 
-## 트러블슈���
+## 트러블슈팅
 
 ### llama-cpp-python 최신 버전 빌드 실패 시
+
 ```bash
 # 0.3.8 버전으로 설치 (MSVC 인코딩 이슈 회피)
 venv/Scripts/pip.exe install llama-cpp-python==0.3.8 --prefer-binary
 ```
 
 ### 모델 경로 확인
+
 ```bash
-ls d:/WP_AI_CODER/models/gguf/*.gguf
+ls d:/WP_AI_CODER/Sm_AICoder/models/gguf/*.gguf
 ```
 
 ### 포트 충돌 시
+
 ```bash
 netstat -ano | findstr :8888
 ```
 
 ### 서버 로그 확인
+
 ```bash
 cat server_out.log   # 표준 출력
 cat server_err.log   # 에러 출력

@@ -32,7 +32,7 @@
 ## 주요 특징
 
 | 항목 | 내용 |
-|------|------|
+| ---- | ---- |
 | 모델 | Qwen2.5-Coder-7B-Instruct Q4_K_M (GGUF) |
 | 추론 방식 | llama-cpp-python (CPU 전용, GPU 불필요) |
 | 인터페이스 | GUI 클라이언트 · CLI 클라이언트 · REST API |
@@ -62,6 +62,8 @@ venv\Scripts\pip install -r requirements.txt
 venv\Scripts\python.exe scripts\download_model.py
 ```
 
+> llama-cpp-python 최신 버전이 MSVC 빌드 실패 시: `pip install llama-cpp-python==0.3.8`
+
 ---
 
 ## 실행 방법
@@ -80,13 +82,13 @@ venv\Scripts\python.exe scripts\download_model.py
 .\stop_server.ps1
 ```
 
-웹 대시보드: http://localhost:8888
+웹 대시보드: `http://localhost:8888`
 
 ---
 
 ## GUI 클라이언트 구성
 
-```
+```text
 +─────────────────────────────────────────────+
 │  상태  |  온도  |  최대토큰  |  대화 초기화   │
 +──────────────────────┬──────────────────────+
@@ -99,7 +101,7 @@ venv\Scripts\python.exe scripts\download_model.py
 ```
 
 | 패널 | 기능 |
-|------|------|
+| ---- | ---- |
 | ① 명령 입력 | 자연어로 코드 요청 입력 |
 | ② 결과 복사 | 응답에서 코드 블록만 자동 추출, 클립보드 복사 |
 | ③ 실행 결과 | 전체 AI 응답 (설명 + 코드) 표시 |
@@ -114,14 +116,14 @@ GUI 클라이언트를 단일 실행파일로 빌드:
 .\build_client.ps1
 ```
 
-빌드 완료 후 `Sm_AICoderClient.exe` 생성됨 (서버와 별도 배포 가능)
+빌드 완료 후 `Sm_AiCoderClient.exe` 생성됨 (서버와 별도 배포 가능)
 
 ---
 
 ## API 엔드포인트
 
 | 엔드포인트 | 메서드 | 설명 |
-|-----------|--------|------|
+| ---------- | ------ | ---- |
 | `/` | GET | 웹 대시보드 |
 | `/health` | GET | 서버·모델 상태 확인 |
 | `/generate` | POST | 단발성 코드 생성 |
@@ -132,7 +134,6 @@ GUI 클라이언트를 단일 실행파일로 빌드:
 ### /chat 요청 예시
 
 ```json
-POST http://localhost:8888/chat
 {
   "messages": [
     {"role": "user", "content": "C 언어로 버블 정렬 구현해줘"}
@@ -144,25 +145,28 @@ POST http://localhost:8888/chat
 
 ---
 
-## 파일 구조
+## 프로젝트 구조
 
-```
-Sm_AICoder/
+```text
+WP_AI_CODER/
+├── Sm_AICoder/
+│   └── models/gguf/             # GGUF 모델 파일 (~4.4GB)
 ├── scripts/
-│   ├── api_server.py        # FastAPI 서버 (메인)
-│   ├── download_model.py    # GGUF 모델 다운로드
-│   └── setup_d_drive.ps1   # D드라이브 환경 설정
-├── images/
-│   └── 실행화면.png          # 대시보드+GUI 동시 실행 스크린샷
-├── gui_client.py            # Tkinter GUI 클라이언트
-├── client.py                # CLI 클라이언트
-├── server.py                # 백그라운드 서버 런처
-├── make_icon.py             # EXE 아이콘 생성
-├── build_client.ps1         # EXE 빌드 스크립트
-├── start_server.ps1         # 서버 시작
-├── start_gui.ps1            # GUI 클라이언트 시작
-├── start_client.ps1         # CLI 클라이언트 시작
-└── stop_server.ps1          # 서버 종료
+│   ├── api_server.py            # FastAPI 서버 (메인)
+│   ├── download_model.py        # GGUF 모델 다운로드
+│   ├── check_env.py             # 환경 검증
+│   └── setup_d_drive.ps1        # D드라이브 독립 설치용
+├── docs/                        # 설치/사용법/API 문서
+├── image/                       # 스크린샷
+├── gui_client.py                # Tkinter GUI 클라이언트
+├── client.py                    # CLI 클라이언트
+├── server.py                    # 백그라운드 서버 런처
+├── make_icon.py                 # EXE 아이콘 생성
+├── build_client.ps1             # EXE 빌드 스크립트
+├── start_server.ps1             # 서버 시작
+├── start_gui.ps1                # GUI 클라이언트 시작
+├── start_client.ps1             # CLI 클라이언트 시작
+└── stop_server.ps1              # 서버 종료
 ```
 
 ---
@@ -170,7 +174,7 @@ Sm_AICoder/
 ## 모델 설정
 
 | 항목 | 값 |
-|------|----|
+| ---- | -- |
 | 기본 모델 | `qwen2.5-coder-7b-instruct-q4_k_m.gguf` |
 | 모델 경로 | `Sm_AICoder/models/gguf/` |
 | 컨텍스트 길이 | 4096 토큰 |
