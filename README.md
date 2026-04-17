@@ -59,7 +59,7 @@ python -m venv venv
 venv\Scripts\pip install -r requirements.txt
 
 # 2. 모델 다운로드 (Qwen2.5-Coder-7B, ~4.4GB)
-venv\Scripts\python.exe scripts\download_model.py
+venv\Scripts\python.exe server\scripts\download_model.py
 ```
 
 > llama-cpp-python 최신 버전이 MSVC 빌드 실패 시: `pip install llama-cpp-python==0.3.8`
@@ -70,16 +70,16 @@ venv\Scripts\python.exe scripts\download_model.py
 
 ```powershell
 # 서버 시작 (백그라운드)
-.\start_server.ps1
+.\\start_server.ps1
 
 # GUI 클라이언트 실행
-.\start_gui.ps1
+.\\start_gui.ps1
 
 # CLI 클라이언트 실행
-.\start_client.ps1
+.\\start_client.ps1
 
 # 서버 종료
-.\stop_server.ps1
+.\\stop_server.ps1
 ```
 
 웹 대시보드: `http://localhost:8888`
@@ -113,10 +113,10 @@ venv\Scripts\python.exe scripts\download_model.py
 GUI 클라이언트를 단일 실행파일로 빌드:
 
 ```powershell
-.\build_client.ps1
+.\\build_client.ps1
 ```
 
-빌드 완료 후 `Sm_AiCoderClient.exe` 생성됨 (서버와 별도 배포 가능)
+빌드 완료 후 `client/Sm_AiCoderClient.exe` 생성됨 (서버와 별도 배포 가능)
 
 ---
 
@@ -149,24 +149,28 @@ GUI 클라이언트를 단일 실행파일로 빌드:
 
 ```text
 WP_AI_CODER/
+├── client/
+│   ├── gui_client.py            # Tkinter GUI 클라이언트
+│   ├── client.py                # CLI 클라이언트
+│   ├── make_icon.py             # EXE 아이콘 생성
+│   └── Sm_AiCoderClient.exe     # 빌드된 GUI 클라이언트
+├── server/
+│   ├── server.py                # 백그라운드 서버 런처
+│   ├── logs/                    # 요청 로그
+│   └── scripts/
+│       ├── api_server.py        # FastAPI 서버 본체
+│       ├── download_model.py    # GGUF 모델 다운로드
+│       ├── check_env.py         # 환경 검증
+│       └── setup_d_drive.ps1    # D드라이브 설치 보조 스크립트
 ├── Sm_AICoder/
-│   └── models/gguf/             # GGUF 모델 파일 (~4.4GB)
-├── scripts/
-│   ├── api_server.py            # FastAPI 서버 (메인)
-│   ├── download_model.py        # GGUF 모델 다운로드
-│   ├── check_env.py             # 환경 검증
-│   └── setup_d_drive.ps1        # D드라이브 독립 설치용
-├── docs/                        # 설치/사용법/API 문서
-├── image/                       # 스크린샷
-├── gui_client.py                # Tkinter GUI 클라이언트
-├── client.py                    # CLI 클라이언트
-├── server.py                    # 백그라운드 서버 런처
-├── make_icon.py                 # EXE 아이콘 생성
-├── build_client.ps1             # EXE 빌드 스크립트
+│   └── models/gguf/             # GGUF 모델 파일
+├── build_client.ps1             # GUI EXE 빌드 스크립트
 ├── start_server.ps1             # 서버 시작
+├── stop_server.ps1              # 서버 종료
 ├── start_gui.ps1                # GUI 클라이언트 시작
 ├── start_client.ps1             # CLI 클라이언트 시작
-└── stop_server.ps1              # 서버 종료
+├── docs/                        # 설치/사용/API 문서
+└── image/                       # 스크린샷
 ```
 
 ---

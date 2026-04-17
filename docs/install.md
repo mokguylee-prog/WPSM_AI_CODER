@@ -1,196 +1,161 @@
-# WP_AI_CODER 서버 설치 기록
+# 설치 가이드
 
-> 설치 일시: 2026-04-17
-> 설치 환경: Windows 11 Pro, Python 3.13
-
----
-
-## 1단계: 환경 확인
-
-```bash
-# Python 버전 확인
-python --version
-# 결과: Python 3.14.3
-
-# 사용 가능한 Python 경로 확인
-where python
-# 결과:
-# C:\Python314\python.exe
-# C:\Users\kadelee\AppData\Local\Programs\Python\Python313\python.exe
-# C:\Users\kadelee\AppData\Local\Microsoft\WindowsApps\python.exe
-
-# 기존 venv 존재 여부 확인
-ls D:/WP_AI_CODER/venv/Scripts/python.exe
-# 결과: 존재하지 않음
-
-# 모델 파일 존재 여부 확인
-ls D:/WP_AI_CODER/Sm_AICoder/models/gguf/*.gguf
-# 결과: 존재하지 않음
-
-# 필요 패키지 설치 여부 확인
-pip list | grep -iE "llama|fastapi|uvicorn|pydantic"
-# 결과: 미설치
-```
+> 기준 환경: Windows 11, Python 3.13, CPU 전용 실행
 
 ---
 
-## 2단계: 가상환경 생성 (Python 3.13 사용)
+## 1. 준비 사항
 
-```bash
-# Python 3.14는 llama-cpp-python 호환 문제 가능성이 있어 3.13 사용
-cd d:/WP_AI_CODER
-"C:/Users/kadelee/AppData/Local/Programs/Python/Python313/python.exe" -m venv venv
+- Python 3.10 이상 3.13 이하
+- 여유 디스크 공간 6GB 이상
+- RAM 8GB 이상
+- PowerShell 실행 가능 환경
 
-# pip 업그레이드
-venv/Scripts/python.exe -m pip install --upgrade pip
-
-# 의존성 설치 (llama-cpp-python C++ 빌드 포함, 5~10분 소요)
-venv/Scripts/pip.exe install -r requirements.txt
-```
+> Python 3.14는 `llama-cpp-python` 호환성이 불안정할 수 있어
+> 권장하지 않습니다.
 
 ---
 
-## 3단계: 경로 수정 (하드코딩 → 프로젝트 상대경로)
-
-원래 코드가 `D:/StarCoder3`으로 하드코딩되어 있어서 아래 파일들을 수정함.
-
-### scripts/api_server.py
-
-```python
-# 변경 전
-MODEL_DIR = "D:/StarCoder3/models/gguf"
-LOG_DIR   = "logs"
-
-# 변경 후
-BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR  = os.path.join(BASE_DIR, "Sm_AICoder", "models", "gguf")
-LOG_DIR    = os.path.join(BASE_DIR, "logs")
-```
-
-### scripts/download_model.py
-
-```python
-# 변경 전
-SAVE_DIR = "D:/StarCoder3/models/gguf"
-
-# 변경 후
-SAVE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Sm_AICoder", "models", "gguf")
-```
-
-### start_server.ps1 / start_gui.ps1 / start_client.ps1 / build_client.ps1
+## 2. 가상환경 생성
 
 ```powershell
-# 변경 전
-$venv = "D:\StarCoder3\venv\Scripts\python.exe"
-if (-not (Test-Path $venv)) { $venv = "python" }
+python -m venv venv
+venv\Scripts\python.exe -m pip install --upgrade pip
+```
 
-# 변경 후
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$venv = Join-Path $scriptDir "venv\Scripts\python.exe"
-if (-not (Test-Path $venv)) { $venv = "python" }
+특정 버전을 지정해야 하면 아래처럼 실행합니다.
+
+```powershell
+$py = "C:\Users\<username>\AppData\Local\Programs\Python\Python313\python.exe"
+& $py -m venv venv
 ```
 
 ---
 
-## 4단계: 모델 다운로드 (~4.4GB)
+## 3. 패키지 설치
 
-```bash
-# Qwen2.5-Coder-7B-Instruct GGUF 모델 다운로드
-# 저장 경로: d:/WP_AI_CODER/Sm_AICoder/models/gguf/
-cd d:/WP_AI_CODER
-venv/Scripts/python.exe scripts/download_model.py
+```powershell
+venv\Scripts\pip.exe install -r requirements.txt
+```
+
+최신 `llama-cpp-python` 빌드에 문제가 있으면 다음처럼 설치합니다.
+
+```powershell
+venv\Scripts\pip.exe install llama-cpp-python==0.3.8 --prefer-binary
+venv\Scripts\pip.exe install fastapi uvicorn pydantic requests huggingface_hub
 ```
 
 ---
 
-## 5단계: 서버 시작 및 확인
+## 4. 모델 다운로드
 
-```bash
-# 서버 시작 (포그라운드에서 직접 실행)
-cd d:/WP_AI_CODER
-venv/Scripts/python.exe scripts/api_server.py
+```powershell
+venv\Scripts\python.exe server\scripts\download_model.py
+```
 
-# 또는 백그라운드 런처 사용
-venv/Scripts/python.exe server.py
+- 기본 모델은 `Qwen2.5-Coder-7B-Instruct Q4_K_M` 입니다.
+- 모델은 `Sm_AICoder/models/gguf/` 아래에 저장됩니다.
+- 다운로드 크기는 약 4.4GB 입니다.
 
-# 또는 PowerShell 스크립트 사용
+---
+
+## 5. 서버 시작
+
+```powershell
 .\start_server.ps1
 ```
 
+직접 실행하려면 아래 명령도 사용할 수 있습니다.
+
+```powershell
+venv\Scripts\python.exe server\server.py
+venv\Scripts\python.exe server\scripts\api_server.py
+```
+
 ---
 
-## 6단계: 서버 동작 확인
+## 6. 클라이언트 실행
 
-```bash
-# 헬스체크
+```powershell
+# GUI 클라이언트
+.\start_gui.ps1
+
+# CLI 클라이언트
+.\start_client.ps1
+```
+
+웹 대시보드는 <http://localhost:8888> 에서 확인할 수 있습니다.
+
+---
+
+## 7. 설치 확인
+
+```powershell
 curl http://localhost:8888/health
-# 기대 결과: {"status":"ok","model":"qwen2.5-coder-7b-instruct-q4_k_m.gguf"}
+```
 
-# 대시보드 접속
-# 브라우저에서 http://localhost:8888 열기
+정상 응답 예:
 
-# API 테스트 (코드 생성 요청)
-curl -X POST http://localhost:8888/generate \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Hello World를 출력하는 C 코드를 작성해줘"}'
-
-# 채팅 API 테스트
-curl -X POST http://localhost:8888/chat \
-  -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "C 언어로 버블 정렬 구현해줘"}]}'
-
-# 통계 확인
-curl http://localhost:8888/stats
+```json
+{
+  "status": "ok",
+  "model": "qwen2.5-coder-7b-instruct-q4_k_m.gguf"
+}
 ```
 
 ---
 
-## 7단계: 서버 종료
+## 8. 선택 사항: D 드라이브 사용
 
-```bash
-# PowerShell 스크립트 사용
-.\stop_server.ps1
+모델과 캐시를 D 드라이브로 돌리고 싶다면 보조 스크립트를 사용합니다.
 
-# 또는 수동으로 (server.pid 파일에서 PID 확인 후)
-# taskkill /PID <pid> /F
+```powershell
+.\venv\Scripts\powershell.exe -ExecutionPolicy Bypass `
+  -File .\server\scripts\setup_d_drive.ps1
 ```
+
+이 스크립트는 다음 작업을 수행합니다.
+
+- Hugging Face 캐시와 pip 캐시를 D 드라이브로 이동
+- 프로젝트 루트의 `venv`는 그대로 유지
+- 필요 시 `Sm_AICoder/models/gguf`를 D 드라이브와 연결
 
 ---
 
-## 설치 결과 요약
+## 9. 자주 쓰는 명령
 
-| 항목 | 상태 | 비고 |
-|------|------|------|
-| Python 3.13 venv | OK | d:/WP_AI_CODER/venv/ |
-| pip 업그레이드 | OK | pip 26.0.1 |
-| requirements.txt 설치 | OK | llama-cpp-python==0.3.8 |
-| 경로 수정 (6개 파일) | OK | 하드코딩 → 상대경로 |
-| 모델 다운로드 | OK | Sm_AICoder/models/gguf/ |
-| 서버 기동 확인 | OK | `http://localhost:8888` |
-| 헬스체크 통과 | OK | - |
-| API 테스트 통과 | OK | - |
+| 목적 | 명령 |
+| ---- | ---- |
+| 환경 확인 | `venv\Scripts\python.exe server\scripts\check_env.py` |
+| 모델 다운로드 | `venv\Scripts\python.exe server\scripts\download_model.py` |
+| 서버 시작 | `.\start_server.ps1` |
+| 서버 종료 | `.\stop_server.ps1` |
+| GUI 실행 | `.\start_gui.ps1` |
+| CLI 실행 | `.\start_client.ps1` |
+| GUI EXE 빌드 | `.\build_client.ps1` |
 
 ---
 
-## 트러블슈팅
+## 10. 트러블슈팅
 
-### llama-cpp-python 빌드 실패 시
+### 모델 파일이 없다는 오류
 
-```bash
-# 사전 빌드된 wheel 사용 (CPU 전용)
-venv/Scripts/pip.exe install llama-cpp-python==0.3.8 --prefer-binary
+```text
+GGUF 모델이 없습니다: .../Sm_AICoder/models/gguf
 ```
 
-### 모델 경로 확인
+`server/scripts/download_model.py`를 먼저 실행하세요.
 
-```bash
-# 모델이 올바른 위치에 있는지 확인
-ls d:/WP_AI_CODER/Sm_AICoder/models/gguf/*.gguf
-```
+### 포트 8888이 이미 사용 중인 경우
 
-### 포트 충돌 시
-
-```bash
-# 8888 포트 사용 중인 프로세스 확인
+```powershell
 netstat -ano | findstr :8888
+taskkill /PID <pid> /F
+```
+
+### 서버 로그를 확인하고 싶은 경우
+
+```powershell
+Get-Content server\server_out.log
+Get-Content server\server_err.log
 ```

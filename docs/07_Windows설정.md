@@ -9,7 +9,8 @@
 where python
 
 # 특정 버전으로 venv 생성 (예: 3.13)
-"C:\Users\<username>\AppData\Local\Programs\Python\Python313\python.exe" -m venv venv
+$py = "C:\Users\<username>\AppData\Local\Programs\Python\Python313\python.exe"
+& $py -m venv venv
 ```
 
 > Python 3.14는 llama-cpp-python 호환이 확인되지 않았습니다. 3.13 이하를 사용하세요.
@@ -20,7 +21,7 @@ where python
 
 최신 llama-cpp-python은 MSVC 컴파일러에서 유니코드 인코딩 에러가 발생할 수 있습니다.
 
-```
+```text
 error C2001: 새 줄 바꿈 문자가 상수에 있습니다
 ```
 
@@ -130,7 +131,7 @@ Path += C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin
 pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
 ```
 
-### api_server.py에서 GPU 레이어 설정
+### server/scripts/api_server.py에서 GPU 레이어 설정
 
 ```python
 N_GPU_LAYERS = 33  # 기본값 0 (CPU 전용) → 원하는 레이어 수로 변경

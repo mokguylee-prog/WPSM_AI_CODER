@@ -14,7 +14,7 @@ StarCoder2(코드 완성 전용)를 대체해 **자연어 지시**로 코드를 
 ```powershell
 python -m venv venv
 venv\Scripts\pip install -r requirements.txt
-venv\Scripts\python.exe scripts\download_model.py
+venv\Scripts\python.exe server\scripts\download_model.py
 ```
 
 > llama-cpp-python 최신 버전이 MSVC 빌드 실패 시 `pip install llama-cpp-python==0.3.8`
@@ -23,30 +23,38 @@ venv\Scripts\python.exe scripts\download_model.py
 
 | 목적 | 명령어 |
 | ---- | ------ |
-| 환경 검증 | `venv\Scripts\python.exe scripts\check_env.py` |
-| 모델 다운로드 | `venv\Scripts\python.exe scripts\download_model.py` |
-| 서버 시작 | `.\start_server.ps1` |
-| GUI 클라이언트 | `.\start_gui.ps1` |
-| CLI 클라이언트 | `.\start_client.ps1` |
-| 서버 종료 | `.\stop_server.ps1` |
+| 환경 검증 | `venv\Scripts\python.exe server\scripts\check_env.py` |
+| 모델 다운로드 | `venv\Scripts\python.exe server\scripts\download_model.py` |
+| 서버 시작 | `.\\start_server.ps1` |
+| GUI 클라이언트 | `.\\start_gui.ps1` |
+| CLI 클라이언트 | `.\\start_client.ps1` |
+| 서버 종료 | `.\\stop_server.ps1` |
 
 ## Architecture
 
-```
+```text
 WP_AI_CODER/
-├── scripts/
-│   ├── api_server.py       ← FastAPI 서버 (메인), /generate, /chat, /health, 대시보드
-│   ├── download_model.py   ← HuggingFace Hub에서 GGUF 모델 다운로드
-│   ├── check_env.py        ← 환경 검증
-│   └── setup_d_drive.ps1   ← D드라이브 독립 설치용 스크립트
+├── client/
+│   ├── gui_client.py         ← Tkinter GUI 클라이언트 (3패널)
+│   ├── client.py             ← 대화형 CLI 클라이언트
+│   ├── make_icon.py          ← EXE 아이콘 생성
+│   └── Sm_AiCoderClient.exe  ← 빌드 결과물
+├── server/
+│   ├── server.py             ← 백그라운드 서버 런처 (PID 관리)
+│   ├── logs/                 ← 요청 로그 저장
+│   └── scripts/
+│       ├── api_server.py     ← FastAPI 서버 (메인), /generate, /chat, /health, 대시보드
+│       ├── download_model.py ← HuggingFace Hub GGUF 모델 다운로드
+│       ├── check_env.py      ← 환경 검증
+│       └── setup_d_drive.ps1 ← D드라이브 설치 보조 스크립트
 ├── Sm_AICoder/
-│   └── models/gguf/        ← GGUF 모델 파일 (서버가 자동으로 가장 큰 파일 선택)
-├── gui_client.py            ← Tkinter GUI 클라이언트 (3패널)
-├── client.py                ← 대화형 CLI 클라이언트
-├── server.py                ← 백그라운드 서버 런처 (PID 관리)
-├── start_server.ps1 / start_gui.ps1 / start_client.ps1 / stop_server.ps1
-├── build_client.ps1         ← GUI 클라이언트 EXE 빌드 (PyInstaller)
-└── docs/                    ← 설치/사용법/API 문서
+│   └── models/gguf/          ← GGUF 모델 파일
+├── build_client.ps1          ← GUI 클라이언트 EXE 빌드
+├── start_server.ps1          ← 서버 시작
+├── stop_server.ps1           ← 서버 종료
+├── start_gui.ps1             ← GUI 클라이언트 실행
+├── start_client.ps1          ← CLI 클라이언트 실행
+└── docs/                     ← 설치/사용법/API 문서
 ```
 
 ## API Endpoints
@@ -60,7 +68,7 @@ WP_AI_CODER/
 | `/stats` | GET | 요청 통계 + 최근 이력 |
 | `/logs/download` | GET | 요청 로그 파일 다운로드 |
 
-## Key Constants (scripts/api_server.py)
+## Key Constants (server/scripts/api_server.py)
 
 - `N_CTX = 4096` — 컨텍스트 길이
 - `N_THREADS = 8` — CPU 스레드 수

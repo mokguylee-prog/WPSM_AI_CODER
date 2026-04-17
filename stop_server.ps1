@@ -1,7 +1,8 @@
 ﻿chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$pidFile = "server.pid"
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$pidFile = Join-Path $scriptDir "server\server.pid"
 if (-not (Test-Path $pidFile)) {
     Write-Host "server.pid 없음 - 서버가 실행 중이지 않습니다."
     exit

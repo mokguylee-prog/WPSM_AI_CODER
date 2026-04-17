@@ -20,7 +20,7 @@ build/
 dist/
 *.spec
 *.exe
-!Sm_AiCoderClient.exe
+!client/Sm_AiCoderClient.exe
 
 # ── 로그 / 런타임 파일 ────────────────────
 *.log
