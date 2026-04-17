@@ -1,0 +1,70 @@
+  StartCode2를 claude 사용하는 방법하고 비슷하게 만들고 싶어, 내가 생각하는 방법은  1. StartCode2가 별도의 폴더에 준비 되어 있잫아. 2. 서버프로그램이 있어서, 서버Side에서 구동을 하고  StartCode2의 엔진을 사용하는 API를 제공하는거야,  3. 어떤 Client가 있어서 프롬프트 명령을 내리면 코드를 작성하는 거야. 1번은 이미 설치 되어 있으니 아무것도 안해도 될것 같아. 2번 3번을 처리하는 코드를 현재 프로젝트 폴더에 동작 가능 여부만 확인 해보도록 만들어줘
+
+
+  내가 운영하고 싶은 방식은 서버가 계속해서 돌아가고 있고, 클라이언트는 프롬프트로 계속 명령을 기다리면서 StartCode2 가 처리하는 시나리오거든, 너가 만든것이 이렇게 되어 있는지 확인 해봐.
+
+포트 8888을 PID 42272가 점유 중입니다. PowerShell에서 순서대로 실행하세요:
+
+
+7B 모델도 다운로드 완료입니다. D:/StarCoder3/models/gguf/에 두 모델이 모두 있습니다:
+
+qwen2.5-coder-1.5b-instruct-q4_k_m.gguf (~1.0GB)
+qwen2.5-coder-7b-instruct-q4_k_m.gguf (~4.4GB) ← 서버가 이걸 자동 선택 (더 큰 파일 우선)
+이제 서버 시작하면 됩니다:
+
+
+# 1. 기존 StarCoder2 서버 종료 (StarCoder 폴더에서)
+cd D:\work_web\StarCoder
+.\stop_server.ps1
+
+# 2. StarCoder3 서버 시작
+cd D:\work_web\StarCoder\StarCoder3
+.\start_server.ps1
+또는 PID로 바로 종료:
+
+
+Stop-Process -Id 42272 -Force
+cd D:\work_web\StarCoder\StarCoder3
+.\start_server.ps1
+
+  llama_cpp도 설치가 안 됐네요. 설치하겠습니다.
+
+  일단 Server를 실행 시키잖아 AI모델 동작 상태를 웹페이지에서 보고 싶고, 가능하겠어, 작업 시간이 얼마나 걸릴까?
+충분히 가능합니다. 구현 범위에 따라 작업량이 다릅니다:
+
+보여줄 수 있는 정보:
+
+서버 상태 (온라인/오프라인)
+로드된 모델명
+총 요청 수 / 총 생성 토큰 수
+평균 응답 시간
+업타임
+최근 요청 히스토리 (몇 건)
+구현 방식:
+
+api_server.py에 /stats 엔드포인트 추가 (통계 JSON 반환)
+/ 경로에 HTML 대시보드 페이지 추가
+페이지가 5초마다 자동 갱신
+예상 작업 시간: 30~40분
+
+api_server.py 수정 (통계 추적 + 엔드포인트) — 15분
+대시보드 HTML 작성 — 15~20분
+
+
+PyInstaller가 tkinter의 TCL/TK DLL들을 빠뜨린 것입니다. 빌드 옵션을 강화합니다.
+
+수정 완료했습니다. 원인과 수정 내용:
+
+항목	이전 (잘못됨)	수정 후 (올바름)
+TCL 목적지	;tcl	;_tcl_data
+TK 목적지	;tk	;_tk_data
+경로 탐색	PowerShell로 고정 경로 탐색	Python sys.base_prefix로 정확히 탐색
+PyInstaller의 런타임 훅(_pyi_rth_tkinter.py)이 _tcl_data / _tk_data 라는 이름으로 찾기 때문에 이름이 맞아야 합니다.
+
+기존 exe 삭제 후 .\build_client.ps1 다시 실행하세요.
+
+
+수정 요약:
+
+Get-Process 대신 taskkill /PID /F 직접 사용 — Windows에서 가장 확실한 프로세스 종료 방법
+$LASTEXITCODE로 성공/실패 판단 (0=성공, 그 외=실패)

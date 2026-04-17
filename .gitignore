@@ -1,0 +1,50 @@
+# ── Python ────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# ── 가상환경 ──────────────────────────────
+venv/
+.venv/
+env/
+
+# ── 환경변수 ──────────────────────────────
+.env
+.env.*
+
+# ── PyInstaller 빌드 결과물 ───────────────
+build/
+dist/
+*.spec
+*.exe
+!Sm_AiCoderClient.exe
+
+# ── 로그 / 런타임 파일 ────────────────────
+*.log
+logs/
+server.pid
+server_out.log
+server_err.log
+
+# ── AI 모델 파일 (용량 큼) ────────────────
+*.gguf
+*.bin
+*.safetensors
+models/
+
+# ── Claude 내부 메모리 ────────────────────
+memory/
+
+# ── IDE / OS ──────────────────────────────
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 기타 생성 파일 ────────────────────────
+output/
+images/
