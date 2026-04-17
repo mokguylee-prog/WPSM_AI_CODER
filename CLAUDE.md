@@ -28,6 +28,7 @@ venv\Scripts\python.exe server\scripts\download_model.py
 | 서버 시작 | `.\\start_server.ps1` |
 | GUI 클라이언트 | `.\\start_gui.ps1` |
 | CLI 클라이언트 | `.\\start_client.ps1` |
+| 에이전트 CLI | `.\\start_agent.ps1` |
 | 서버 종료 | `.\\stop_server.ps1` |
 
 ## Architecture
@@ -37,6 +38,7 @@ WP_AI_CODER/
 ├── client/
 │   ├── gui_client.py         ← Tkinter GUI 클라이언트 (3패널)
 │   ├── client.py             ← 대화형 CLI 클라이언트
+│   ├── agent_client.py       ← 에이전트 하네스 CLI 클라이언트
 │   ├── make_icon.py          ← EXE 아이콘 생성
 │   └── Sm_AiCoderClient.exe  ← 빌드 결과물
 ├── server/
@@ -49,12 +51,26 @@ WP_AI_CODER/
 │       └── setup_d_drive.ps1 ← D드라이브 설치 보조 스크립트
 ├── Sm_AICoder/
 │   └── models/gguf/          ← GGUF 모델 파일
-├── build_client.ps1          ← GUI 클라이언트 EXE 빌드
-├── start_server.ps1          ← 서버 시작
-├── stop_server.ps1           ← 서버 종료
-├── start_gui.ps1             ← GUI 클라이언트 실행
-├── start_client.ps1          ← CLI 클라이언트 실행
-└── docs/                     ← 설치/사용법/API 문서
+├── harness/                    ← 에이전트 하네스 프레임워크
+│   ├── agent_loop.py           ← 에이전트 루프 엔진 (탐색→수정→검증)
+│   ├── agent_api.py            ← FastAPI 라우터 (/agent/*)
+│   ├── context_manager.py      ← 컨텍스트 압축/작업 상태 관리
+│   ├── config.py               ← 하네스 설정 관리
+│   ├── harness_config.json     ← 설정 파일
+│   ├── tools/
+│   │   ├── registry.py         ← 도구 레지스트리
+│   │   ├── file_tools.py       ← read_file, list_files, write_file
+│   │   ├── code_tools.py       ← search_code, apply_patch, show_diff
+│   │   └── command_tools.py    ← run_command (화이트리스트 기반)
+│   └── prompts/
+│       └── system_prompt.py    ← 에이전트 시스템 프롬프트/스키마
+├── build_client.ps1            ← GUI 클라이언트 EXE 빌드
+├── start_server.ps1            ← 서버 시작
+├── stop_server.ps1             ← 서버 종료
+├── start_gui.ps1               ← GUI 클라이언트 실행
+├── start_client.ps1            ← CLI 클라이언트 실행
+├── start_agent.ps1             ← 에이전트 CLI 실행
+└── docs/                       ← 설치/사용법/API 문서
 ```
 
 ## API Endpoints
@@ -67,6 +83,9 @@ WP_AI_CODER/
 | `/chat` | POST | 다중 턴 대화 (히스토리 포함) |
 | `/stats` | GET | 요청 통계 + 최근 이력 |
 | `/logs/download` | GET | 요청 로그 파일 다운로드 |
+| `/agent/run` | POST | 에이전트 루프 실행 (도구 자동 호출) |
+| `/agent/reset` | POST | 에이전트 세션 초기화 |
+| `/agent/sessions` | GET | 활성 에이전트 세션 목록 |
 
 ## Key Constants (server/scripts/api_server.py)
 

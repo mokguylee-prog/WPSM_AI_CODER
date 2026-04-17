@@ -147,3 +147,8 @@ api_server.py:125-166 /generate·/chat에 try/except Exception + traceback.print
 
 
 Client에 VS Code처럼 OpenFolder 버튼만들고 파일,폴더 생성하는 버튼을 만들자.
+
+
+
+요즘 하네스 개발 방법 잘 알지?. 지금까지 개발된 내용을 기반으로, 
+진행방향.md 파일을 반영, 하네스 개발 방식으로 개발하도록 필요한 AGENTS및 파일들을 생성해줘.

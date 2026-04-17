@@ -4,9 +4,17 @@ import glob
 import time
 import json
 import traceback
+import itertools
 from typing import Optional
 from collections import deque
 from datetime import datetime
+
+import sys
+
+# 프로젝트 루트를 sys.path에 추가 (harness 모듈 임포트용)
+_PROJECT_ROOT_FOR_PATH = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _PROJECT_ROOT_FOR_PATH not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT_FOR_PATH)
 
 try:
     from llama_cpp import Llama
@@ -39,6 +47,14 @@ SYSTEM_PROMPT = (
 )
 
 app = FastAPI(title="Sm_AICoder Instruction API")
+
+# 에이전트 하네스 라우터 등록
+try:
+    from harness.agent_api import router as agent_router
+    app.include_router(agent_router)
+    print("[harness] 에이전트 라우터 등록 완료 (/agent/*)")
+except ImportError as _harness_err:
+    print(f"[harness] 에이전트 모듈 로드 실패 (기본 모드로 동작): {_harness_err}")
 llm: Optional[Llama] = None
 model_name: str = ""
 start_time: float = 0.0
@@ -50,30 +66,58 @@ stats = {
     "total_elapsed_ms": 0.0,
 }
 recent_requests: deque = deque(maxlen=20)
+_req_counter = itertools.count(1)
 
 
 def write_log(entry: dict):
     os.makedirs(LOG_DIR, exist_ok=True)
+    # 내부 필드(_로 시작)는 로그에 쓰지 않음
+    clean = {k: v for k, v in entry.items() if not k.startswith("_")}
     with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        f.write(json.dumps(clean, ensure_ascii=False) + "\n")
 
 
-def record(prompt_tokens: int, gen_tokens: int, elapsed_ms: float,
-           prompt: str, response: str):
+def begin_request(prompt: str, kind: str = "chat") -> dict:
+    """요청 진입 즉시 대시보드에 'pending' 상태로 등록.
+
+    완료 시 finish_request(entry, ...) 또는 fail_request(entry, err)를 호출.
+    """
+    entry = {
+        "id": next(_req_counter),
+        "kind": kind,
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "prompt": prompt,
+        "response": "",
+        "prompt_tokens": 0,
+        "gen_tokens": 0,
+        "elapsed_ms": 0,
+        "status": "pending",
+        "_t0": time.time(),
+    }
+    recent_requests.appendleft(entry)
+    return entry
+
+
+def finish_request(entry: dict, prompt_tokens: int, gen_tokens: int,
+                   elapsed_ms: float, response: str):
+    entry["prompt_tokens"] = prompt_tokens
+    entry["gen_tokens"] = gen_tokens
+    entry["elapsed_ms"] = round(elapsed_ms)
+    entry["response"] = response
+    entry["status"] = "done"
+
     stats["total_requests"] += 1
     stats["total_prompt_tokens"] += prompt_tokens
     stats["total_generated_tokens"] += gen_tokens
     stats["total_elapsed_ms"] += elapsed_ms
 
-    entry = {
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "prompt": prompt,
-        "response": response,
-        "prompt_tokens": prompt_tokens,
-        "gen_tokens": gen_tokens,
-        "elapsed_ms": round(elapsed_ms),
-    }
-    recent_requests.appendleft(entry)
+    write_log(entry)
+
+
+def fail_request(entry: dict, err: str):
+    entry["status"] = "error"
+    entry["response"] = f"[오류] {err}"
+    entry["elapsed_ms"] = round((time.time() - entry.get("_t0", time.time())) * 1000)
     write_log(entry)
 
 
@@ -157,23 +201,28 @@ def generate(req: GenerateRequest):
         {"role": "system", "content": req.system},
         {"role": "user",   "content": req.prompt},
     ]
-    max_tokens = _clamp_max_tokens(messages, req.max_tokens)
-    t0 = time.time()
+    entry = begin_request(req.prompt, kind="generate")
     try:
+        max_tokens = _clamp_max_tokens(messages, req.max_tokens)
+        t0 = time.time()
         result = llm.create_chat_completion(messages=messages,
             max_tokens=max_tokens, temperature=req.temperature, top_p=req.top_p)
+        elapsed = (time.time() - t0) * 1000
+        choice = result["choices"][0]
+        usage = result.get("usage", {})
+        pt = usage.get("prompt_tokens", 0)
+        gt = usage.get("completion_tokens", 0)
+        response_text = choice["message"]["content"]
+        finish_request(entry, pt, gt, elapsed, response_text)
+        return GenerateResponse(generated=response_text,
+            model=model_name, prompt_tokens=pt, generated_tokens=gt)
+    except HTTPException as e:
+        fail_request(entry, e.detail if isinstance(e.detail, str) else str(e.detail))
+        raise
     except Exception as e:
         traceback.print_exc()
+        fail_request(entry, f"{type(e).__name__}: {e}")
         raise HTTPException(500, f"생성 중 오류: {type(e).__name__}: {e}")
-    elapsed = (time.time() - t0) * 1000
-    choice = result["choices"][0]
-    usage = result.get("usage", {})
-    pt = usage.get("prompt_tokens", 0)
-    gt = usage.get("completion_tokens", 0)
-    response_text = choice["message"]["content"]
-    record(pt, gt, elapsed, req.prompt, response_text)
-    return GenerateResponse(generated=response_text,
-        model=model_name, prompt_tokens=pt, generated_tokens=gt)
 
 
 @app.post("/chat")
@@ -183,24 +232,31 @@ def chat(req: ChatRequest):
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
     if not messages or messages[0]["role"] != "system":
         messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
-    max_tokens = _clamp_max_tokens(messages, req.max_tokens)
-    t0 = time.time()
+
+    user_msgs = [m.content for m in req.messages if m.role == "user"]
+    entry = begin_request(user_msgs[-1] if user_msgs else "", kind="chat")
+
     try:
+        max_tokens = _clamp_max_tokens(messages, req.max_tokens)
+        t0 = time.time()
         result = llm.create_chat_completion(messages=messages,
             max_tokens=max_tokens, temperature=req.temperature, top_p=req.top_p)
+        elapsed = (time.time() - t0) * 1000
+        choice = result["choices"][0]
+        usage = result.get("usage", {})
+        pt = usage.get("prompt_tokens", 0)
+        gt = usage.get("completion_tokens", 0)
+        response_text = choice["message"]["content"]
+        finish_request(entry, pt, gt, elapsed, response_text)
+        return {"response": response_text, "elapsed_ms": round(elapsed),
+                "message": choice["message"], "model": model_name, "usage": usage}
+    except HTTPException as e:
+        fail_request(entry, e.detail if isinstance(e.detail, str) else str(e.detail))
+        raise
     except Exception as e:
         traceback.print_exc()
+        fail_request(entry, f"{type(e).__name__}: {e}")
         raise HTTPException(500, f"생성 중 오류: {type(e).__name__}: {e}")
-    elapsed = (time.time() - t0) * 1000
-    choice = result["choices"][0]
-    usage = result.get("usage", {})
-    pt = usage.get("prompt_tokens", 0)
-    gt = usage.get("completion_tokens", 0)
-    response_text = choice["message"]["content"]
-    user_msgs = [m.content for m in req.messages if m.role == "user"]
-    record(pt, gt, elapsed, user_msgs[-1] if user_msgs else "", response_text)
-    return {"response": response_text, "elapsed_ms": round(elapsed),
-            "message": choice["message"], "model": model_name, "usage": usage}
 
 
 @app.get("/health")
@@ -214,15 +270,22 @@ def get_stats():
     avg_ms = (stats["total_elapsed_ms"] / stats["total_requests"]
               if stats["total_requests"] > 0 else 0)
     items = []
+    now = time.time()
     for r in recent_requests:
-        items.append({
+        item = {
             "time": r["time"],
             "prompt": r["prompt"],
             "response": r["response"],
             "prompt_tokens": r["prompt_tokens"],
             "gen_tokens": r["gen_tokens"],
             "elapsed_ms": r["elapsed_ms"],
-        })
+            "status": r.get("status", "done"),
+            "kind": r.get("kind", "chat"),
+        }
+        # pending이면 현재까지 경과 시간(ms)을 계산해서 함께 반환
+        if item["status"] == "pending":
+            item["elapsed_ms"] = round((now - r.get("_t0", now)) * 1000)
+        items.append(item)
     return {
         "model": model_name,
         "uptime_sec": uptime,
@@ -282,7 +345,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   td { padding: 9px 14px; border-top: 1px solid #21262d; color: #c9d1d9; }
   tr.clickable { cursor: pointer; }
   tr.clickable:hover td { background: #1c2128; }
+  tr.pending td { background: #1e1a0a; }
+  tr.pending:hover td { background: #2a230d; }
+  tr.error td { background: #2a1414; }
+  tr.error:hover td { background: #3a1a1a; }
   .prompt-cell { color: #8b949e; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .status-badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:600; margin-right:6px; }
+  .status-pending { background:#3d2e0a; color:#d29922; animation: blink 1.2s infinite; }
+  .status-done    { background:#0d2818; color:#3fb950; }
+  .status-error   { background:#2a1414; color:#f85149; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.55} }
   .refresh-info { font-size: 0.75rem; color: #484f58; margin-top: 16px; text-align: right; }
   /* 모달 */
   .modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:100; justify-content:center; align-items:center; }
@@ -406,14 +478,31 @@ async function refresh() {
     recentData = d.recent || [];
     const tbody = document.getElementById('req-tbody');
     if (recentData.length > 0) {
-      tbody.innerHTML = recentData.map((r, i) => `
-        <tr class="clickable" onclick="openModal(${i})">
+      tbody.innerHTML = recentData.map((r, i) => {
+        const status = r.status || 'done';
+        const rowCls = status === 'pending' ? 'clickable pending'
+                      : status === 'error'   ? 'clickable error'
+                      : 'clickable';
+        const badge = status === 'pending'
+            ? '<span class="status-badge status-pending">처리 중</span>'
+            : status === 'error'
+            ? '<span class="status-badge status-error">오류</span>'
+            : '';
+        const elapsed = status === 'pending'
+            ? `${r.elapsed_ms.toLocaleString()} ms 경과...`
+            : `${r.elapsed_ms.toLocaleString()} ms`;
+        const ptCell = status === 'pending' ? '-' : r.prompt_tokens.toLocaleString();
+        const gtCell = status === 'pending' ? '-' : r.gen_tokens.toLocaleString();
+        const safePrompt = r.prompt.replace(/"/g,'&quot;');
+        return `
+        <tr class="${rowCls}" onclick="openModal(${i})">
           <td>${r.time.split(' ')[1]}</td>
-          <td class="prompt-cell" title="${r.prompt.replace(/"/g,'&quot;')}">${r.prompt.substring(0,60)}${r.prompt.length>60?'...':''}</td>
-          <td>${r.prompt_tokens.toLocaleString()}</td>
-          <td>${r.gen_tokens.toLocaleString()}</td>
-          <td>${r.elapsed_ms.toLocaleString()} ms</td>
-        </tr>`).join('');
+          <td class="prompt-cell" title="${safePrompt}">${badge}${r.prompt.substring(0,60)}${r.prompt.length>60?'...':''}</td>
+          <td>${ptCell}</td>
+          <td>${gtCell}</td>
+          <td>${elapsed}</td>
+        </tr>`;
+      }).join('');
     } else {
       tbody.innerHTML = '<tr><td colspan="5" style="color:#484f58;text-align:center;padding:20px">요청 없음</td></tr>';
     }
@@ -425,7 +514,7 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, 5000);
+setInterval(refresh, 2000);
 </script>
 </body>
 </html>
