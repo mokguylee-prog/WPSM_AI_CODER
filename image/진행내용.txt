@@ -68,3 +68,82 @@ PyInstaller의 런타임 훅(_pyi_rth_tkinter.py)이 _tcl_data / _tk_data 라는
 
 Get-Process 대신 taskkill /PID /F 직접 사용 — Windows에서 가장 확실한 프로세스 종료 방법
 $LASTEXITCODE로 성공/실패 판단 (0=성공, 그 외=실패)
+
+
+C#이고 Form1.cs 파일 이 있어 프로젝트 파일을 만들어줘
+이 명령 하나로 서버가 죽어버린다. 처리 못하면 못한다고 하지.
+
+서버가 죽어버린다.
+
+Client명령 받으면 Dash보드에 먼저 등록하고 처리하도록 하자.
+
+C#이고 Form1.cs 파일 이 있어 프로젝트 파일을 만들어줘" 명령 전달했더니 서버가 소리없이 죽어 버려
+Read d:\WP_AI_CODER\server\scripts\api_server.py
+Read d:\WP_AI_CODER\server\server.py
+Bash Check server crash logs
+IN
+ls -la d:/WP_AI_CODER/server/server_err.log d:/WP_AI_CODER/server/server_out.log 2>/dev/null && echo "---ERR---" && tail -50 d:/WP_AI_CODER/server/server_err.log && echo "---OUT---" && tail -30 d:/WP_AI_CODER/server/server_out.log
+
+OUT
+-rw-r--r-- 1 kadelee 197121  631 Apr 17 21:25 d:/WP_AI_CODER/server/server_err.log
+-rw-r--r-- 1 kadelee 197121 7118 Apr 17 21:31 d:/WP_AI_CODER/server/server_out.log
+---ERR---
+D:\WP_AI_CODER\server\scripts\api_server.py:113: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+INFO:     Started server process [20620]
+INFO:     Waiting for application startup.
+llama_init_from_model: n_ctx_per_seq (4096) < n_ctx_train (131072) -- the full capacity of the model will not be utilized
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8888 (Press CTRL+C to quit)
+---OUT---
+INFO:     127.0.0.1:65495 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51692 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65497 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51692 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65494 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65499 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65494 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65502 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65494 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65494 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65504 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65494 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65506 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65494 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65494 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65509 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65494 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54376 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65494 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54470 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55440 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55440 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55699 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55440 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63184 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55440 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55440 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63187 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55440 - "GET /stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57769 - "GET /health HTTP/1.1" 200 OK
+서버가 네이티브 레벨(llama.cpp C++)에서 죽어서 Python stderr에 아무 trace도 남지 않는 상황입니다. server_err.log에 크래시 로그가 전혀 없고, server_out.log도 /chat 요청이 도착하기 전 상태에서 끊겨 있어요(OS가 프로세스를 강제 종료한 뒤 버퍼 플러시 실패). 증상상 **네이티브 크래시(대부분 OOM 또는 context overflow)**입니다.
+
+원인 분석:
+
+api_server.py:119: verbose=False → llama.cpp 내부 에러 메시지가 가려짐
+api_server.py:134: create_chat_completion 호출을 try/except로 감싸지 않아 예외 trace도 유실
+Qwen2.5-Coder-7B-Q4 + n_ctx=4096은 RAM ~6GB를 쓰는데, "프로젝트 파일 전체"를 만들게 하면 생성 길이가 길어져 일부 환경에서 네이티브 크래시 발생
+두 가지 개선을 동시에 제안합니다. 적용해도 될까요?
+
+api_server.py:119 verbose=True로 변경 → llama.cpp 크래시 직전 메시지 확보
+api_server.py:125-166 /generate·/chat에 try/except Exception + traceback.print_exc() 추가 → 다음 크래시 때 server_err.log에 원인 기록, 연결 강제 종료 대신 500 응답 반환
+그리고 테스트용으로 GUI의 최대 토큰을 512로 줄여서 같은 프롬프트를 재시도해 보세요. 여전히 죽는다면 OOM 가능성이 높으므로 작업관리자로 메모리 사용량을 확인해야 합니다.
+
+
+
+Client에 VS Code처럼 OpenFolder 버튼만들고 파일,폴더 생성하는 버튼을 만들자.

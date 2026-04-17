@@ -3,6 +3,7 @@ import os
 import glob
 import time
 import json
+import traceback
 from typing import Optional
 from collections import deque
 from datetime import datetime
@@ -24,7 +25,8 @@ MODEL_DIR  = os.path.join(PROJECT_ROOT, "Sm_AICoder", "models", "gguf")
 LOG_DIR    = os.path.join(SERVER_DIR, "logs")
 LOG_FILE  = os.path.join(LOG_DIR, f"requests_{datetime.now().strftime('%Y%m%d%H%M%S')}.log")
 PORT = 8888
-N_CTX = 4096
+N_CTX = 8192
+CTX_SAFETY_MARGIN = 256
 N_THREADS = 8
 N_GPU_LAYERS = 0
 
@@ -75,6 +77,31 @@ def record(prompt_tokens: int, gen_tokens: int, elapsed_ms: float,
     write_log(entry)
 
 
+def _count_messages_tokens(messages: list[dict]) -> int:
+    if llm is None:
+        return 0
+    try:
+        text = "\n".join(m.get("content", "") for m in messages)
+        return len(llm.tokenize(text.encode("utf-8"), add_bos=False))
+    except Exception:
+        return sum(len(m.get("content", "")) // 3 for m in messages)
+
+
+def _clamp_max_tokens(messages: list[dict], requested: int) -> int:
+    prompt_tokens = _count_messages_tokens(messages)
+    budget = N_CTX - prompt_tokens - CTX_SAFETY_MARGIN
+    if budget <= 64:
+        raise HTTPException(
+            400,
+            f"컨텍스트 한도 초과: prompt≈{prompt_tokens} tok / n_ctx={N_CTX}. "
+            "새 대화를 시작하거나 이전 턴을 줄여주세요."
+        )
+    if requested > budget:
+        print(f"[guard] max_tokens {requested} → {budget} (prompt≈{prompt_tokens})")
+        return budget
+    return requested
+
+
 def find_model() -> str:
     files = glob.glob(os.path.join(MODEL_DIR, "*.gguf"))
     if not files:
@@ -117,7 +144,7 @@ def load_model():
     model_name = os.path.basename(path)
     print(f"모델 로딩: {model_name}")
     llm = Llama(model_path=path, n_ctx=N_CTX, n_threads=N_THREADS,
-                n_gpu_layers=N_GPU_LAYERS, verbose=False)
+                n_gpu_layers=N_GPU_LAYERS, verbose=True)
     start_time = time.time()
     print("서버 준비 완료")
 
@@ -130,9 +157,14 @@ def generate(req: GenerateRequest):
         {"role": "system", "content": req.system},
         {"role": "user",   "content": req.prompt},
     ]
+    max_tokens = _clamp_max_tokens(messages, req.max_tokens)
     t0 = time.time()
-    result = llm.create_chat_completion(messages=messages,
-        max_tokens=req.max_tokens, temperature=req.temperature, top_p=req.top_p)
+    try:
+        result = llm.create_chat_completion(messages=messages,
+            max_tokens=max_tokens, temperature=req.temperature, top_p=req.top_p)
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, f"생성 중 오류: {type(e).__name__}: {e}")
     elapsed = (time.time() - t0) * 1000
     choice = result["choices"][0]
     usage = result.get("usage", {})
@@ -151,9 +183,14 @@ def chat(req: ChatRequest):
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
     if not messages or messages[0]["role"] != "system":
         messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+    max_tokens = _clamp_max_tokens(messages, req.max_tokens)
     t0 = time.time()
-    result = llm.create_chat_completion(messages=messages,
-        max_tokens=req.max_tokens, temperature=req.temperature, top_p=req.top_p)
+    try:
+        result = llm.create_chat_completion(messages=messages,
+            max_tokens=max_tokens, temperature=req.temperature, top_p=req.top_p)
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, f"생성 중 오류: {type(e).__name__}: {e}")
     elapsed = (time.time() - t0) * 1000
     choice = result["choices"][0]
     usage = result.get("usage", {})
