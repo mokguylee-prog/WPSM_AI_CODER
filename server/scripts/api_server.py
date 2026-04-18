@@ -159,12 +159,44 @@ recent_requests: deque = deque(maxlen=20)
 _req_counter = itertools.count(1)
 
 # ---------------------------------------------------------------------------
-# LLM 직렬화 — llama-cpp 는 스레드 안전하지 않으므로 한 번에 하나만 실행
-#   _llm_lock  : 추론 중 잠금. acquire 실패 시 즉시 503 반환 (큐에 쌓지 않음)
-#   _stream_cancel : 스트리밍 중 클라이언트 끊김을 worker 스레드에 전달
+# LLM 직렬화 + 세션 watchdog
+#   _llm_lock          : 추론 직렬화. 한 번에 하나만 실행
+#   _active_cancel     : 현재 세션의 취소 이벤트 (watchdog → worker 신호)
+#   _active_last_tick  : 마지막 토큰 생성 시각 (watchdog 기준점)
+#   _WATCHDOG_INTERVAL : watchdog 체크 주기 (초)
+#   _IDLE_CANCEL_S     : 이 시간 이상 무활동이면 세션을 강제 취소
+#   _LOCK_WAIT_S       : 새 요청이 lock 획득을 기다리는 최대 시간
 # ---------------------------------------------------------------------------
 _llm_lock: threading.Lock = threading.Lock()
-_stream_cancel: threading.Event = threading.Event()
+_active_cancel: Optional[threading.Event] = None
+_active_last_tick: float = 0.0
+_WATCHDOG_INTERVAL: float = 5.0
+_IDLE_CANCEL_S: float = 10.0
+_LOCK_WAIT_S: float = 20.0
+
+
+def _watchdog_loop() -> None:
+    """5초마다 실행. 무활동 세션을 감지해 취소하고 lock을 해제한다."""
+    global _active_cancel, _active_last_tick
+    while True:
+        time.sleep(_WATCHDOG_INTERVAL)
+        if not _llm_lock.locked():
+            continue
+        idle = time.time() - _active_last_tick
+        if idle < _IDLE_CANCEL_S:
+            continue
+        print(f"[watchdog] Session idle {idle:.0f}s — force cancel & release lock")
+        if _active_cancel is not None:
+            _active_cancel.set()
+        # lock은 acquire한 스레드가 아닌 곳에서도 release 가능 (CPython threading.Lock)
+        try:
+            _llm_lock.release()
+        except RuntimeError:
+            pass  # 이미 해제된 경우
+
+
+_watchdog_thread = threading.Thread(target=_watchdog_loop, daemon=True)
+_watchdog_thread.start()
 
 
 def write_log(entry: dict):
@@ -380,10 +412,12 @@ def load_model():
 
 @app.post("/generate", response_model=GenerateResponse)
 def generate(req: GenerateRequest):
+    global _active_cancel, _active_last_tick
     if llm is None:
         raise HTTPException(503, "Model is loading")
-    if not _llm_lock.acquire(blocking=False):
-        raise HTTPException(503, "Server busy: inference in progress. Please retry shortly.")
+    if not _llm_lock.acquire(blocking=True, timeout=_LOCK_WAIT_S):
+        raise HTTPException(503, "Server busy: previous session did not finish in time.")
+    _active_last_tick = time.time()
 
     messages = [{"role": "system", "content": req.system}, {"role": "user", "content": req.prompt}]
     entry = begin_request(req.prompt, kind="generate")
@@ -420,10 +454,12 @@ def generate(req: GenerateRequest):
 
 @app.post("/chat")
 def chat(req: ChatRequest):
+    global _active_cancel, _active_last_tick
     if llm is None:
         raise HTTPException(503, "Model is loading")
-    if not _llm_lock.acquire(blocking=False):
-        raise HTTPException(503, "Server busy: inference in progress. Please retry shortly.")
+    if not _llm_lock.acquire(blocking=True, timeout=_LOCK_WAIT_S):
+        raise HTTPException(503, "Server busy: previous session did not finish in time.")
+    _active_last_tick = time.time()
 
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
     if not messages or messages[0]["role"] != "system":
@@ -489,12 +525,12 @@ def chat_stream(req: ChatStreamRequest):
     클라이언트 강제 종료 시: gen()에서 GeneratorExit → _stream_cancel 세트 →
     worker가 토큰 루프를 중단 → _llm_lock 해제 → 새 요청 즉시 수락 가능.
     """
+    global _active_cancel, _active_last_tick
     if llm is None:
         raise HTTPException(503, "Model is loading")
-    if not _llm_lock.acquire(blocking=False):
-        raise HTTPException(503, "Server busy: inference in progress. Please retry shortly.")
+    if not _llm_lock.acquire(blocking=True, timeout=_LOCK_WAIT_S):
+        raise HTTPException(503, "Server busy: previous session did not finish in time.")
 
-    # P4-2: idle-timeout 상수 — AgentLoop.IDLE_TIMEOUT_S 와 동일 값 사용
     IDLE_TIMEOUT_S: float = 60.0
 
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
@@ -506,10 +542,12 @@ def chat_stream(req: ChatStreamRequest):
     q: "queue.Queue[object]" = queue.Queue()
     done = object()
 
-    # 클라이언트 끊김을 worker 에 알리는 per-request 취소 이벤트
     cancel_event = threading.Event()
+    _active_cancel = cancel_event
+    _active_last_tick = time.time()
 
     def worker():
+        global _active_last_tick
         try:
             max_tokens = _clamp_max_tokens(messages, req.max_tokens)
             t0 = time.time()
@@ -526,14 +564,14 @@ def chat_stream(req: ChatStreamRequest):
                 )),
             )
             for piece in stream:
-                # 클라이언트가 끊기면 루프 중단 — llama-cpp 제너레이터도 close()됨
                 if cancel_event.is_set():
-                    fail_request(entry, "cancelled: client disconnected")
+                    fail_request(entry, "cancelled: client disconnected or watchdog")
                     return
                 delta = piece["choices"][0].get("delta", {})
                 token = delta.get("content", "")
                 if token:
                     chunks.append(token)
+                    _active_last_tick = time.time()  # watchdog 기준점 갱신
                     q.put({"type": "token", "text": token})
             elapsed = (time.time() - t0) * 1000
             response_text = "".join(chunks)
@@ -547,11 +585,10 @@ def chat_stream(req: ChatStreamRequest):
             q.put({"type": "error", "error": f"{type(e).__name__}: {e}"})
         finally:
             q.put(done)
-            # worker 종료 시 항상 락 해제 — 새 요청이 대기 없이 들어올 수 있음
             try:
                 _llm_lock.release()
             except RuntimeError:
-                pass  # 이미 해제된 경우 무시
+                pass  # watchdog이 이미 해제한 경우
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -577,7 +614,6 @@ def chat_stream(req: ChatStreamRequest):
                     break
                 yield json.dumps(item, ensure_ascii=False) + "\n"
         except GeneratorExit:
-            # 클라이언트 강제 종료 — worker 에 취소 신호 전달
             cancel_event.set()
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
