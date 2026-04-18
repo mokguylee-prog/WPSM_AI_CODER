@@ -154,14 +154,18 @@ class StarCoderGUI:
         self._chat_text_buffer = []
         self._agent_step_buffer = []
         self._buffer_flush_job = None
+        self._result_events = list(self._state.get("result_events", []))
         self._context_injected = False   # P2-1: 첫 턴 1회만 컨텍스트 주입 플래그
         self._server_fail_count = 0
         self._agent_fail_count = 0
+        self._last_server_online = False
 
         # 에이전트 모드
         self._agent_mode = bool(self._state.get("agent_mode", False))
         self._agent_available = False
         self._agent_session_id = f"gui-{uuid.uuid4().hex[:12]}"
+        self._agent_session_dirty = True
+        self._reconnect_epoch = 0
 
         # 저장된(또는 기본) 창 크기 적용
         self.root.geometry(self._layout["geometry"])
@@ -216,6 +220,44 @@ class StarCoderGUI:
     def _new_agent_session_id(self):
         self._agent_session_id = f"gui-{uuid.uuid4().hex[:12]}"
 
+    def _reset_agent_session(self, old_session_id: str | None = None):
+        """Rotate to a fresh GUI agent session and retire the old one asynchronously."""
+        self._cancel_requested = False
+        self._busy_mode = ""
+        self._cleanup_stream_state()
+        if old_session_id:
+            def reset_old_session(session_id=old_session_id):
+                try:
+                    requests.post(
+                        f"{API_URL}/agent/reset",
+                        params={"session_id": session_id},
+                        timeout=5,
+                    )
+                except Exception:
+                    pass
+
+            threading.Thread(target=reset_old_session, daemon=True).start()
+        self._new_agent_session_id()
+        self._agent_session_dirty = False
+
+    def _mark_agent_session_dirty(self):
+        self._agent_session_dirty = True
+
+    def _bump_reconnect_epoch(self) -> int:
+        self._reconnect_epoch += 1
+        return self._reconnect_epoch
+
+    def _current_reconnect_epoch(self) -> int:
+        return self._reconnect_epoch
+
+    def _is_epoch_current(self, epoch: int) -> bool:
+        return epoch == self._reconnect_epoch
+
+    def _ensure_agent_session_ready(self):
+        if self._agent_session_dirty:
+            self._reset_agent_session(self._agent_session_id)
+        return self._agent_session_id
+
     def _save_layout(self):
         try:
             self._layout["geometry"] = self.root.winfo_geometry()
@@ -230,12 +272,11 @@ class StarCoderGUI:
         try:
             if hasattr(self, "input_box"):
                 self._state["draft_command"] = self.input_box.get("1.0", tk.END).rstrip("\n")
-            if hasattr(self, "result_box"):
-                self._state["result_text"] = self.result_box.get("1.0", tk.END).rstrip("\n")
             if hasattr(self, "copy_box"):
                 self._state["copy_text"] = self.copy_box.get("1.0", tk.END).rstrip("\n")
             self._state["history"] = self.history
             self._state["agent_mode"] = self._agent_mode
+            self._state["result_events"] = self._result_events
             with open(STATE_FILE, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, ensure_ascii=False, indent=2)
             if hasattr(self, "folder_tree"):
@@ -248,16 +289,39 @@ class StarCoderGUI:
         if draft and hasattr(self, "input_box"):
             self.input_box.delete("1.0", tk.END)
             self.input_box.insert("1.0", draft)
-        if hasattr(self, "result_box"):
-            result_text = self._state.get("result_text", "")
-            if result_text:
-                self._set_text(self.result_box, result_text)
         if hasattr(self, "copy_box"):
             copy_text = self._state.get("copy_text", "")
             if copy_text:
                 self._set_text(self.copy_box, copy_text)
         self.history = list(self._state.get("history", []))
+        self._render_saved_result_events()
         self._apply_mode_ui()
+
+    def _render_saved_result_events(self):
+        if not hasattr(self, "result_box"):
+            return
+        self.result_box.config(state=tk.NORMAL)
+        self.result_box.delete("1.0", tk.END)
+        for event in self._result_events:
+            self._render_saved_result_event(event)
+        self.result_box.config(state=tk.DISABLED)
+
+    def _render_saved_result_event(self, event: dict):
+        kind = event.get("kind")
+        if kind == "message":
+            role = event.get("role", "assistant")
+            content = event.get("content", "")
+            self._append_message(role, content, record_event=False)
+        elif kind == "chat_begin":
+            prompt = event.get("prompt", "")
+            self._chat_stream_begin(prompt, record_event=False)
+        elif kind == "agent_begin":
+            prompt = event.get("prompt", "")
+            self._agent_stream_begin(prompt, record_event=False)
+        elif kind == "agent_step":
+            self._render_agent_step(event.get("step", {}), record_event=False)
+        elif kind == "error":
+            self._on_error(event.get("msg", ""), record_event=False)
 
     def _schedule_layout_save(self):
         if self._draft_save_job is not None:
@@ -807,7 +871,7 @@ class StarCoderGUI:
             self.result_box.see(tk.END)
         return saved
 
-    def _append_message(self, role, content):
+    def _append_message(self, role, content, record_event=True):
         """마크다운 스타일로 메시지 추가"""
         self.result_box.config(state=tk.NORMAL)
 
@@ -827,6 +891,8 @@ class StarCoderGUI:
         self.result_box.insert(tk.END, "\n" + "─" * 60 + "\n", "divider")
         self.result_box.config(state=tk.DISABLED)
         self.result_box.see(tk.END)
+        if record_event:
+            self._result_events.append({"kind": "message", "role": role, "content": content})
 
     def _parse_and_insert(self, text):
         """마크다운 텍스트 파싱 및 스타일과 함께 삽입"""
@@ -945,6 +1011,7 @@ class StarCoderGUI:
     def _run_chat(self, prompt: str):
         """?? ?? ? ?? /chat ????? ??"""
         try:
+            epoch = self._current_reconnect_epoch()
             if self._active_stream_response is not None:
                 self._cleanup_stream_state()
                 time.sleep(0.15)
@@ -955,7 +1022,7 @@ class StarCoderGUI:
             }
             response_parts = []
             token_count = 0
-            self.root.after(0, lambda: self._chat_stream_begin(prompt))
+            self.root.after(0, lambda e=epoch: self._chat_stream_begin(prompt, e))
             with requests.post(f"{API_URL}/chat/stream", json=payload, stream=True, timeout=(10, 600)) as r:
                 self._active_stream_response = r
                 r.raise_for_status()
@@ -974,38 +1041,40 @@ class StarCoderGUI:
                         token = evt.get("text", "")
                         response_parts.append(token)
                         token_count += 1
-                        self.root.after(0, lambda tok=token: self._chat_stream_token(tok))
+                        self.root.after(0, lambda tok=token, e=epoch: self._chat_stream_token(tok, e))
                     elif t == "heartbeat":
-                        self.root.after(0, lambda n=token_count: self._chat_stream_heartbeat(n))
+                        self.root.after(0, lambda n=token_count, e=epoch: self._chat_stream_heartbeat(n, e))
                     elif t == "final":
                         response = evt.get("response", "".join(response_parts))
                         elapsed = evt.get("elapsed_ms", 0)
-                        self.root.after(0, lambda resp=response, el=elapsed, n=token_count: self._chat_stream_final(resp, el, n))
+                        self.root.after(0, lambda resp=response, el=elapsed, n=token_count, e=epoch: self._chat_stream_final(resp, el, n, e))
                         break
                     elif t == "error":
-                        self.root.after(0, lambda m=evt.get("error", "error"): self._on_error(m))
+                        self.root.after(0, lambda m=evt.get("error", "error"), e=epoch: self._on_error(m, e))
                         break
         except (requests.exceptions.ConnectionError, ConnectionResetError, OSError) as e:
             msg = str(e)
             if "10054" in msg or "Connection broken" in msg or "??? ?????" in msg:
-                self.root.after(0, self._cleanup_stream_state)
+                self.root.after(0, lambda e=epoch: self._cleanup_stream_state(e))
                 return
-            self.root.after(0, lambda err=msg: self._on_error(err))
+            self.root.after(0, lambda err=msg, e=epoch: self._on_error(err, e))
         except Exception as e:
-            self.root.after(0, lambda err=str(e): self._on_error(err))
+            self.root.after(0, lambda err=str(e), e=epoch: self._on_error(err, e))
         finally:
-            self._cleanup_stream_state()
-            self.root.after(0, self._done_sending)
+            self._cleanup_stream_state(epoch)
+            self.root.after(0, lambda e=epoch: self._done_sending(e))
 
     def _run_agent(self, prompt: str):
         """???? ?? ? /agent/stream ????? ???? ??"""
         try:
+            epoch = self._current_reconnect_epoch()
             if self._active_stream_response is not None:
                 self._cleanup_stream_state()
                 time.sleep(0.15)
+            session_id = self._ensure_agent_session_ready()
             payload = {
                 "message": prompt,
-                "session_id": self._agent_session_id,
+                "session_id": session_id,
                 "working_dir": self._open_folder or PROJECT_ROOT,
                 "max_iterations": 15,
                 "temperature": self.temperature.get(),
@@ -1013,7 +1082,7 @@ class StarCoderGUI:
             }
 
             # ?? ?: ? ?? ??? ?? + ?? ?? ?? ?? ???
-            self.root.after(0, lambda: self._agent_stream_begin(prompt))
+            self.root.after(0, lambda e=epoch: self._agent_stream_begin(prompt, e))
 
             with requests.post(
                 f"{API_URL}/agent/stream",
@@ -1038,29 +1107,31 @@ class StarCoderGUI:
                     t = evt.get("type")
                     if t == "step":
                         step = evt.get("step", {})
-                        self.root.after(0, lambda s=step: self._agent_stream_step(s))
+                        self.root.after(0, lambda s=step, e=epoch: self._agent_stream_step(s, e))
                     elif t == "heartbeat":
                         last_beat = time.time()
-                        self.root.after(0, lambda n=getattr(self, "_agent_step_count", 0): self._agent_stream_heartbeat(n))
+                        self.root.after(0, lambda n=getattr(self, "_agent_step_count", 0), e=epoch: self._agent_stream_heartbeat(n, e))
                     elif t == "final":
                         answer = evt.get("answer", "")
                         elapsed = evt.get("elapsed_ms", 0)
-                        self.root.after(0, lambda a=answer, e=elapsed, n=getattr(self, "_agent_step_count", 0): self._agent_stream_final(a, e, n))
+                        self.root.after(0, lambda a=answer, e=elapsed, n=getattr(self, "_agent_step_count", 0), ep=epoch: self._agent_stream_final(a, e, n, ep))
                     elif t == "error":
                         err = evt.get("error", "? ? ?? ??")
-                        self.root.after(0, lambda m=err: self._on_error(m))
+                        self.root.after(0, lambda m=err, e=epoch: self._on_error(m, e))
 
         except (requests.exceptions.ConnectionError, ConnectionResetError, OSError) as e:
             msg = str(e)
+            self._mark_agent_session_dirty()
             if "10054" in msg or "Connection broken" in msg or "??? ?????" in msg:
-                self.root.after(0, self._cleanup_stream_state)
+                self.root.after(0, lambda e=epoch: self._cleanup_stream_state(e))
                 return
-            self.root.after(0, lambda err=msg: self._on_error(err))
+            self.root.after(0, lambda err=msg, e=epoch: self._on_error(err, e))
         except Exception as e:
-            self.root.after(0, lambda err=str(e): self._on_error(err))
+            self._mark_agent_session_dirty()
+            self.root.after(0, lambda err=str(e), e=epoch: self._on_error(err, e))
         finally:
-            self._cleanup_stream_state()
-            self.root.after(0, self._done_sending)
+            self._cleanup_stream_state(epoch)
+            self.root.after(0, lambda e=epoch: self._done_sending(e))
 
     def _begin_busy_indicator(self, label: str):
         self._busy_label = label
@@ -1128,7 +1199,9 @@ class StarCoderGUI:
         if self._chat_text_buffer or self._agent_step_buffer:
             self._schedule_buffer_flush()
 
-    def _chat_stream_begin(self, prompt: str):
+    def _chat_stream_begin(self, prompt: str, epoch: int | None = None):
+        if epoch is not None and not self._is_epoch_current(epoch):
+            return
         self.status_bar.config(text="채팅 응답 생성 중", bg="#1f4d2e", fg=GREEN)
         self.elapsed_lbl.config(text="0초 / 0토큰")
         self.result_box.config(state=tk.NORMAL)
@@ -1136,18 +1209,24 @@ class StarCoderGUI:
         self.result_box.insert(tk.END, "\n", "normal")
         self.result_box.config(state=tk.DISABLED)
 
-    def _chat_stream_token(self, token: str):
+    def _chat_stream_token(self, token: str, epoch: int | None = None):
+        if epoch is not None and not self._is_epoch_current(epoch):
+            return
         if self._cancel_requested:
             return
         self._chat_text_buffer.append(token)
         self._schedule_buffer_flush()
 
-    def _chat_stream_heartbeat(self, token_count: int = 0):
+    def _chat_stream_heartbeat(self, token_count: int = 0, epoch: int | None = None):
+        if epoch is not None and not self._is_epoch_current(epoch):
+            return
         elapsed = int(time.time() - getattr(self, "_busy_started_at", time.time()))
         self.status_bar.config(text=f"채팅 응답 생성 중... {elapsed}s", bg="#1f4d2e", fg=GREEN)
         self.elapsed_lbl.config(text=f"{elapsed}초 / {token_count}토큰")
 
-    def _chat_stream_final(self, response: str, elapsed_ms: int, token_count: int = 0):
+    def _chat_stream_final(self, response: str, elapsed_ms: int, token_count: int = 0, epoch: int | None = None):
+        if epoch is not None and not self._is_epoch_current(epoch):
+            return
         if self._cancel_requested:
             return
         self._flush_stream_buffers()
@@ -1165,6 +1244,7 @@ class StarCoderGUI:
     def _cancel_current_job(self):
         self._cancel_requested = True
         self._cleanup_stream_state()
+        self._mark_agent_session_dirty()
         if self._agent_mode:
             try:
                 requests.post(
@@ -1211,7 +1291,9 @@ class StarCoderGUI:
         turns = len(self.history) // 2
         self.turn_lbl.config(text=f"대화: {turns}턴")
 
-    def _agent_stream_begin(self, prompt: str):
+    def _agent_stream_begin(self, prompt: str, epoch: int | None = None):
+        if epoch is not None and not self._is_epoch_current(epoch):
+            return
         """스트리밍 시작 — '에이전트 실행 중' 플레이스홀더 제거하고 헤더 렌더"""
         self.result_box.config(state=tk.NORMAL)
 
@@ -1236,7 +1318,9 @@ class StarCoderGUI:
         self.elapsed_lbl.config(text="⏳ 실행 중... / 0단계")
         self.status_bar.config(text="에이전트 실행 중", bg="#1a365d", fg="#93c5fd")
 
-    def _agent_stream_step(self, step: dict):
+    def _agent_stream_step(self, step: dict, epoch: int | None = None):
+        if epoch is not None and not self._is_epoch_current(epoch):
+            return
         """스트리밍 단계 이벤트 — 즉시 ③ 창에 추가.
 
         P4-1: step{"kind":"token", "n":int} 이벤트는 result_box 에 렌더하지 않고
@@ -1259,14 +1343,18 @@ class StarCoderGUI:
         self._agent_step_count = getattr(self, "_agent_step_count", 0) + 1
         self._agent_last_beat = time.time()
 
-    def _agent_stream_heartbeat(self, step_count: int = 0):
+    def _agent_stream_heartbeat(self, step_count: int = 0, epoch: int | None = None):
+        if epoch is not None and not self._is_epoch_current(epoch):
+            return
         """2초마다 서버가 살아있음을 알림 — 상단 경과 표시 갱신"""
         self._agent_last_beat = time.time()
         n = step_count or getattr(self, "_agent_step_count", 0)
         self.elapsed_lbl.config(text=f"⏳ 실행 중... ({n}단계)")
         self.status_bar.config(text=f"에이전트 실행 중... {n}단계", bg="#1a365d", fg="#93c5fd")
 
-    def _agent_stream_final(self, answer: str, elapsed_ms: int, step_count: int = 0):
+    def _agent_stream_final(self, answer: str, elapsed_ms: int, step_count: int = 0, epoch: int | None = None):
+        if epoch is not None and not self._is_epoch_current(epoch):
+            return
         """최종 답변 이벤트"""
         self.result_box.config(state=tk.NORMAL)
         self.result_box.insert(tk.END, "\n", "normal")
@@ -1338,7 +1426,9 @@ class StarCoderGUI:
             self.result_box.insert(tk.END, "      ", "agent_step")
             self.result_box.insert(tk.END, "JSON 파싱 실패 — 재시도\n", "agent_fail")
 
-    def _on_error(self, msg):
+    def _on_error(self, msg, epoch: int | None = None):
+        if epoch is not None and not self._is_epoch_current(epoch):
+            return
         self.result_box.config(state=tk.NORMAL)
         # 이전 "생성 중..." 제거
         content = self.result_box.get("1.0", tk.END)
@@ -1349,7 +1439,9 @@ class StarCoderGUI:
         self.result_box.config(state=tk.DISABLED)
         self._set_text(self.copy_box, "")
 
-    def _done_sending(self):
+    def _done_sending(self, epoch: int | None = None):
+        if epoch is not None and not self._is_epoch_current(epoch):
+            return
         self._sending = False
         self._inflight = False  # P4-3: in-flight 해제 — 다음 Send 클릭 허용
         # 모드별로 원래 버튼 색상 복원
@@ -1864,20 +1956,7 @@ class StarCoderGUI:
 
         # 에이전트 세션을 새로 시작한다.
         if self._agent_mode:
-            old_session_id = self._agent_session_id
-            self._new_agent_session_id()
-
-            def reset():
-                try:
-                    requests.post(
-                        f"{API_URL}/agent/reset",
-                        params={"session_id": old_session_id},
-                        timeout=5,
-                    )
-                except Exception:
-                    pass
-
-            threading.Thread(target=reset, daemon=True).start()
+            self._reset_agent_session(self._agent_session_id)
 
     def _run_ps1(self, script_name):
         script = os.path.join(PROJECT_ROOT, script_name)
@@ -1900,44 +1979,42 @@ class StarCoderGUI:
     # ──────────────────────────────────────────
     def _check_server(self):
         def check():
+            epoch = self._current_reconnect_epoch()
             try:
                 r = requests.get(f"{API_URL}/health", timeout=3)
                 data = r.json()
                 model = data.get("model", "unknown")
 
-                agent_ok = False
-                try:
-                    ra = requests.get(f"{API_URL}/agent/sessions", timeout=3)
-                    agent_ok = ra.status_code == 200
-                except Exception:
-                    pass
-
-                self.root.after(0, lambda: self._set_online(True, model, agent_ok))
+                self.root.after(0, lambda e=epoch, m=model: self._set_online(True, m, epoch=e))
             except Exception:
-                self.root.after(0, lambda: self._set_online(False, "", False))
+                self.root.after(0, lambda e=epoch: self._set_online(False, "", epoch=e))
             self.root.after(5000, self._check_server)
 
         threading.Thread(target=check, daemon=True).start()
 
-    def _set_online(self, online, model, agent_ok=False):
+    def _set_online(self, online, model, epoch: int | None = None):
+        if epoch is not None and not self._is_epoch_current(epoch):
+            return
         if online:
-            if not self._last_server_online:
-                self._new_agent_session_id()
+            reconnecting = not self._last_server_online
+            if reconnecting:
+                self._bump_reconnect_epoch()
+                self._mark_agent_session_dirty()
             self._last_server_online = True
             self._server_fail_count = 0
-            self._agent_fail_count = 0 if agent_ok else self._agent_fail_count + 1
-            self._agent_available = agent_ok
+            self._agent_fail_count = 0
+            self._agent_available = True
             self.dot.config(fg=GREEN)
-            agent_tag = " + Agent" if self._agent_available else ""
-            self.status_lbl.config(fg=MUTED, text=f"서버 온라인 - {model}{agent_tag}")
+            self.status_lbl.config(fg=MUTED, text=f"Server Online - {model}")
         else:
             self._server_fail_count += 1
             if self._server_fail_count < 3:
                 return
             self._last_server_online = False
             self.dot.config(fg=RED)
-            self.status_lbl.config(fg=RED, text="서버 오프라인 - localhost:8888")
+            self.status_lbl.config(fg=RED, text="Server Offline - localhost:8888")
             self._agent_available = False
+            self._mark_agent_session_dirty()
 if __name__ == "__main__":
     configure_windows_app_id()
     root = tk.Tk()

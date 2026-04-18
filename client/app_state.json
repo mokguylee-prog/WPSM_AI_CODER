@@ -3,5 +3,6 @@
   "result_text": "⏳ 생성 중입니다...\n\nSm_AICoder ▶ ",
   "copy_text": "",
   "draft_command": "C 언어로  FFT계산 프로그램 작성",
-  "agent_mode": false
+  "agent_mode": false,
+  "result_events": []
 }

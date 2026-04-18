@@ -13,6 +13,7 @@ import json
 import sys
 import os
 import time
+import uuid
 
 SERVER = "http://localhost:8888"
 
@@ -140,7 +141,8 @@ def main():
     agent_ok = check_agent()
     print_banner(model, agent_ok)
 
-    session_id = "cli-default"
+    session_id = f"cli-{uuid.uuid4().hex[:12]}"
+    last_agent_ok = agent_ok
     working_dir = os.getcwd()
 
     while True:
@@ -192,7 +194,9 @@ def main():
 """)
             continue
 
-        if not agent_ok:
+        agent_ok = check_agent()
+
+        if False and not agent_ok:
             # 에이전트 비활성 → 기본 채팅
             print(f"\n{C_YELLOW}(에이전트 비활성 — 기본 채팅 모드){C_RESET}")
             try:

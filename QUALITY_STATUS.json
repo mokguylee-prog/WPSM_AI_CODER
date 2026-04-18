@@ -1,0 +1,25 @@
+﻿{
+  "server_resilience": {
+    "single_session_failure_isolated": true,
+    "retry_timeout_health_cleanup": true,
+    "session_work_connection_separated": true
+  },
+  "client_feedback": {
+    "success_failure_in_progress_clear": true,
+    "failure_reason_visible": true
+  },
+  "reconnect_stability": {
+    "reconnect_does_not_mix_sessions": true,
+    "reconnect_does_not_fake_offline": true
+  },
+  "observability": {
+    "health_stable": true,
+    "secondary_failures_do_not_mean_offline": true,
+    "logs_are_useful": true
+  },
+  "recovery_workflow": {
+    "next_action_guided": true,
+    "auto_vs_manual_clear": true,
+    "repro_driven_fixing": true
+  }
+}

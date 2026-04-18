@@ -117,6 +117,7 @@ def _get_or_create_agent(
             agent.max_iterations = max_iterations
             agent.temperature = temperature
             agent.max_tokens = max_tokens
+            agent.working_dir = working_dir
         _session_cancel_flags.setdefault(session_id, False)
         _session_last_seen[session_id] = now
 
