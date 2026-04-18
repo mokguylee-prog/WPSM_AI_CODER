@@ -157,6 +157,9 @@ class StarCoderGUI:
         self._buffer_flush_job = None
         self._stream_token_deque: collections.deque = collections.deque()
         self._stream_render_job = None
+        self._stream_first_rendered = False
+        self._stream_last_token_time = 0.0
+        self._stream_cursor_shown = False
         self._result_events = list(self._state.get("result_events", []))
         self._context_injected = False   # P2-1: 첫 턴 1회만 컨텍스트 주입 플래그
         self._server_fail_count = 0
@@ -763,6 +766,7 @@ class StarCoderGUI:
         self.result_box.tag_config("agent_ok",       foreground=AGENT_OK_FG,      font=("Consolas", 9))
         self.result_box.tag_config("agent_fail",     foreground=AGENT_FAIL_FG,    font=("Consolas", 9))
         self.result_box.tag_config("agent_answer",   background=AGENT_ANSWER_BG,  foreground=GREEN,           font=("Consolas", 11))
+        self.result_box.tag_config("stream_cursor",  foreground="#60a5fa",         font=("Consolas", 12, "bold"))
 
     # ──────────────────────────────────────────
     # Helpers
@@ -1147,12 +1151,22 @@ class StarCoderGUI:
         self.elapsed_lbl.config(text=f"{label}... {elapsed}s")
         self.root.after(1000, self._busy_tick)
 
-    # ── 배치 스트림 렌더 (150ms 주기) ──────────────────────────────────────
+    # ── 배치 스트림 렌더 ────────────────────────────────────────────────────
+    # 첫 토큰: 즉시 표시 (0ms)
+    # 이후  : 150ms 주기 배치 렌더
+    # 커서  : ▌ 를 끝에 표시해 생성 중임을 시각적으로 확인
+    # 멈춤  : 마지막 토큰 후 2초 초과 시 상태바에 "응답 대기 중..." 표시
+    _STREAM_BATCH_MS = 150
+    _STREAM_STALL_SEC = 2.0
+
     def _start_stream_render_timer(self, epoch: int | None = None):
         if self._stream_render_job is not None:
             return
+        self._stream_first_rendered = False
+        self._stream_last_token_time = time.time()
+        self._stream_cursor_shown = False
         self._stream_render_job = self.root.after(
-            150, lambda e=epoch: self._render_stream_batch(e)
+            0, lambda e=epoch: self._render_stream_batch(e)
         )
 
     def _stop_stream_render_timer(self):
@@ -1164,6 +1178,20 @@ class StarCoderGUI:
             except Exception:
                 pass
 
+    def _stream_cursor_remove(self):
+        """result_box 끝의 커서 문자(▌)를 제거한다."""
+        if not self._stream_cursor_shown:
+            return
+        try:
+            self.result_box.config(state=tk.NORMAL)
+            pos = self.result_box.search("▌", "end-2c", backwards=True, stopindex="1.0")
+            if pos:
+                self.result_box.delete(pos, f"{pos}+1c")
+        except Exception:
+            pass
+        finally:
+            self._stream_cursor_shown = False
+
     def _render_stream_batch(self, epoch: int | None = None):
         self._stream_render_job = None
         if epoch is not None and not self._is_epoch_current(epoch):
@@ -1172,25 +1200,50 @@ class StarCoderGUI:
         if self._cancel_requested:
             self._stream_token_deque.clear()
             return
+
         tokens = []
         try:
             while True:
                 tokens.append(self._stream_token_deque.popleft())
         except IndexError:
             pass
+
+        now = time.time()
         if tokens:
+            self._stream_last_token_time = now
             text = "".join(tokens)
             self.result_box.config(state=tk.NORMAL)
+            self._stream_cursor_remove()
             self.result_box.insert(tk.END, text, "normal")
+            self.result_box.insert(tk.END, "▌", "stream_cursor")
+            self._stream_cursor_shown = True
             self.result_box.config(state=tk.DISABLED)
             self.result_box.see(tk.END)
+            if not self._stream_first_rendered:
+                self._stream_first_rendered = True
+                elapsed = int(now - getattr(self, "_busy_started_at", now))
+                self.status_bar.config(
+                    text=f"응답 생성 중  첫 토큰 수신 ({elapsed}s)",
+                    bg="#1f4d2e", fg=GREEN
+                )
+        else:
+            # 토큰 없음 — 멈춤 감지
+            stall = now - self._stream_last_token_time
+            if stall >= self._STREAM_STALL_SEC and self._sending:
+                elapsed = int(now - getattr(self, "_busy_started_at", now))
+                self.status_bar.config(
+                    text=f"응답 대기 중... ({elapsed}s 경과)",
+                    bg="#451a03", fg="#fdba74"
+                )
+
         if self._sending:
+            delay = self._STREAM_BATCH_MS if self._stream_first_rendered else 0
             self._stream_render_job = self.root.after(
-                150, lambda e=epoch: self._render_stream_batch(e)
+                delay, lambda e=epoch: self._render_stream_batch(e)
             )
 
     def _drain_stream_token_deque(self):
-        """스트림 종료 시 deque에 남은 토큰을 즉시 렌더링."""
+        """스트림 종료 시 deque에 남은 토큰을 즉시 렌더링하고 커서를 제거한다."""
         self._stop_stream_render_timer()
         tokens = []
         try:
@@ -1198,12 +1251,13 @@ class StarCoderGUI:
                 tokens.append(self._stream_token_deque.popleft())
         except IndexError:
             pass
+        self.result_box.config(state=tk.NORMAL)
+        self._stream_cursor_remove()
         if tokens:
             text = "".join(tokens)
-            self.result_box.config(state=tk.NORMAL)
             self.result_box.insert(tk.END, text, "normal")
-            self.result_box.config(state=tk.DISABLED)
-            self.result_box.see(tk.END)
+        self.result_box.config(state=tk.DISABLED)
+        self.result_box.see(tk.END)
 
     def _schedule_buffer_flush(self):
         if self._buffer_flush_job is not None:
@@ -1265,7 +1319,7 @@ class StarCoderGUI:
     def _chat_stream_begin(self, prompt: str, epoch: int | None = None):
         if epoch is not None and not self._is_epoch_current(epoch):
             return
-        self.status_bar.config(text="채팅 응답 생성 중", bg="#1f4d2e", fg=GREEN)
+        self.status_bar.config(text="첫 토큰 대기 중...", bg="#1c3a5e", fg="#93c5fd")
         self.elapsed_lbl.config(text="0초 / 0토큰")
         self.result_box.config(state=tk.NORMAL)
         self.result_box.insert(tk.END, "\nSm_AICoder ▶ ", "ai_header")
@@ -1286,7 +1340,12 @@ class StarCoderGUI:
         if epoch is not None and not self._is_epoch_current(epoch):
             return
         elapsed = int(time.time() - getattr(self, "_busy_started_at", time.time()))
-        self.status_bar.config(text=f"채팅 응답 생성 중... {elapsed}s", bg="#1f4d2e", fg=GREEN)
+        tok_per_sec = round(token_count / elapsed, 1) if elapsed > 0 else 0
+        stall = time.time() - self._stream_last_token_time
+        if stall >= self._STREAM_STALL_SEC:
+            self.status_bar.config(text=f"응답 대기 중... ({elapsed}s 경과)", bg="#451a03", fg="#fdba74")
+        else:
+            self.status_bar.config(text=f"응답 생성 중  {tok_per_sec} tok/s", bg="#1f4d2e", fg=GREEN)
         self.elapsed_lbl.config(text=f"{elapsed}초 / {token_count}토큰")
 
     def _chat_stream_final(self, response: str, elapsed_ms: int, token_count: int = 0, epoch: int | None = None):
