@@ -650,7 +650,16 @@ def cancel_inference():
     global _active_cancel, _active_entry
     cancelled = False
 
-    # streaming 취소 신호
+    # 모든 활성 에이전트 세션 즉시 취소 (agent_loop._cancel_requested = True)
+    try:
+        from Sm_AIAgent.agent_api import cancel_all_active
+        cancel_all_active()
+        cancelled = True
+        print("[cancel] all agent sessions cancelled")
+    except Exception:
+        pass
+
+    # streaming /chat 취소 신호
     if _active_cancel is not None and not _active_cancel.is_set():
         _active_cancel.set()
         cancelled = True

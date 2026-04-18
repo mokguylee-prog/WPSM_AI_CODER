@@ -58,6 +58,14 @@ _sessions: dict[str, AgentLoop] = {}
 _session_cancel_flags: dict[str, bool] = {}
 _session_last_seen: dict[str, float] = {}
 _sessions_lock = threading.RLock()
+
+
+def cancel_all_active():
+    """모든 활성 에이전트 세션을 즉시 취소한다. /cancel 엔드포인트에서 호출."""
+    with _sessions_lock:
+        for sid, agent in list(_sessions.items()):
+            _session_cancel_flags[sid] = True
+            agent.cancel(notify_server=False)  # 서버 /cancel 재귀 방지
 SESSION_IDLE_TIMEOUT_S = 15 * 60
 SESSION_SWEEP_INTERVAL_S = 60
 _last_session_sweep = 0.0
@@ -244,28 +252,33 @@ def agent_stream(req: AgentRequest):
     threading.Thread(target=worker, daemon=True).start()
 
     def gen():
-        while True:
-            if _session_cancel_flags.get(req.session_id):
-                agent.cancel()
-                _session_cancel_flags[req.session_id] = False
-                yield json.dumps({"type": "error", "error": "cancelled"}, ensure_ascii=False) + "\n"
-                break
-            try:
-                item = q.get(timeout=1.0)
-            except queue.Empty:
-                yield json.dumps({"type": "heartbeat", "ts": time.time()}, ensure_ascii=False) + "\n"
-                continue
+        try:
+            while True:
+                if _session_cancel_flags.get(req.session_id):
+                    agent.cancel(notify_server=False)
+                    _session_cancel_flags[req.session_id] = False
+                    yield json.dumps({"type": "error", "error": "cancelled"}, ensure_ascii=False) + "\n"
+                    break
+                try:
+                    item = q.get(timeout=1.0)
+                except queue.Empty:
+                    yield json.dumps({"type": "heartbeat", "ts": time.time()}, ensure_ascii=False) + "\n"
+                    continue
 
-            if item is _DONE:
-                break
+                if item is _DONE:
+                    break
 
-            kind, payload = item
-            if kind == "step":
-                yield json.dumps({"type": "step", "step": payload}, ensure_ascii=False) + "\n"
-            elif kind == "final":
-                yield json.dumps({"type": "final", **payload}, ensure_ascii=False) + "\n"
-            elif kind == "error":
-                yield json.dumps({"type": "error", **payload}, ensure_ascii=False) + "\n"
+                kind, payload = item
+                if kind == "step":
+                    yield json.dumps({"type": "step", "step": payload}, ensure_ascii=False) + "\n"
+                elif kind == "final":
+                    yield json.dumps({"type": "final", **payload}, ensure_ascii=False) + "\n"
+                elif kind == "error":
+                    yield json.dumps({"type": "error", **payload}, ensure_ascii=False) + "\n"
+        except GeneratorExit:
+            # 클라이언트 강제 종료 — 에이전트 즉시 취소
+            agent.cancel(notify_server=False)
+            _session_cancel_flags[req.session_id] = False
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 

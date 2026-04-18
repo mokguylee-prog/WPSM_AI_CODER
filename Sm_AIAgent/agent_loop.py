@@ -206,13 +206,13 @@ class AgentLoop:
 
         return "[寃쎄퀬] 理쒕? 諛섎났 ?잛닔???꾨떖?덉뒿?덈떎. ?묒뾽???꾨즺?섏? ?딆븯?????덉뒿?덈떎."
 
-    def cancel(self):
+    def cancel(self, notify_server: bool = True):
         self._cancel_requested = True
-        # 서버에도 즉시 취소 신호 전달 — pending 엔트리 정리 + 추론 중단
-        try:
-            requests.post(f"{self.api_url}/cancel", timeout=2)
-        except Exception:
-            pass
+        if notify_server:
+            try:
+                requests.post(f"{self.api_url}/cancel", timeout=2)
+            except Exception:
+                pass
 
     def _estimate_prompt_tokens(self, messages: list[dict]) -> int:
         """P6-2: 硫붿떆吏 ?꾩껜 ?띿뒪??湲몄씠瑜?湲곗??쇰줈 ?좏겙 ?섎? 蹂댁닔?곸쑝濡?異붿젙?쒕떎.
