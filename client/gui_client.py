@@ -120,9 +120,9 @@ def apply_windows_title_bar_style(root: tk.Tk):
             b = int(rgb_hex[4:6], 16)
             return ctypes.c_int((b << 16) | (g << 8) | r)
 
-        caption_color = colorref("#b91c1c")
+        caption_color = colorref("#6d28d9")
         text_color = colorref("#f8fafc")
-        border_color = colorref("#7f1d1d")
+        border_color = colorref("#4c1d95")
 
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
             hwnd, DWMWA_CAPTION_COLOR, ctypes.byref(caption_color), ctypes.sizeof(caption_color)

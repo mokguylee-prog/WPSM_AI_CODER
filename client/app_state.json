@@ -1,24 +1,25 @@
 {
-  "history": [
-    {
-      "role": "user",
-      "content": "aaaa"
-    },
-    {
-      "role": "assistant",
-      "content": "I'm sorry, but I'm not sure what you're asking. Could you please provide more details or context?"
-    }
-  ],
+  "history": [],
   "result_text": "",
-  "copy_text": "I'm sorry, but I'm not sure what you're asking. Could you please provide more details or context?",
-  "draft_command": "aaaa",
-  "agent_mode": false,
+  "copy_text": "D:\\work_ai2\\Robot_Dialog\\sh\nD:\\work_ai2\\Robot_Dialog\\build.ps1\nD:\\work_ai2\\Robot_Dialog\\hello.c\nD:\\work_ai2\\Robot_Dialog\\main.cpp\nD:\\work_ai2\\Robot_Dialog\\Makefile\nD:\\work_ai2\\Robot_Dialog\\run.ps1\nD:\\work_ai2\\Robot_Dialog\\test.txt\nD:\\work_ai2\\Robot_Dialog\\WinFormsExample\\Form1.cs\nD:\\work_ai2\\Robot_Dialog\\WinFormsExample\\Form1.Designer.cs\nD:\\work_ai2\\Robot_Dialog\\WinFormsExample\\Form1.resx\nD:\\work_ai2\\Robot_Dialog\\WinFormsExample\\Program.cs\nD:\\work_ai2\\Robot_Dialog\\WinFormsExample\\WinFormsExample.csproj",
+  "draft_command": "RUST로 hello world 만들어봐",
+  "agent_mode": true,
   "open_folder": "D:\\work_ai2\\Robot_Dialog",
   "result_events": [
     {
       "kind": "message",
       "role": "assistant",
       "content": "I'm sorry, but I'm not sure what you're asking. Could you please provide more details or context?"
+    },
+    {
+      "kind": "message",
+      "role": "assistant",
+      "content": "I'm sorry, but I'm not sure what you're asking. Could you please provide more details or context?"
+    },
+    {
+      "kind": "message",
+      "role": "assistant",
+      "content": "Sure! Here is a simple \"Hello, World!\" program in Rust:\n\nFile: src/main.rs\n```rust\nfn main() {\n    println!(\"Hello, World!\");\n}\n```\n\nTo run this program, you need to have Rust installed. Save the code in a file named `main.rs` in a directory, then open a terminal and navigate to that directory. Run the following command:\n\n```sh\ncargo run\n```\n\nThis will compile and run your Rust program, and you should see \"Hello, World!\" printed to the console."
     }
   ]
 }
