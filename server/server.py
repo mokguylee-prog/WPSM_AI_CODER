@@ -10,7 +10,7 @@ import urllib.request
 
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SERVER_DIR)
-API_SERVER = os.path.join(SERVER_DIR, "scripts", "api_server.py")
+API_SERVER = os.path.join(SERVER_DIR, "scripts", "web_server.py")
 PID_FILE = os.path.join(SERVER_DIR, "server.pid")
 LOG_OUT = os.path.join(SERVER_DIR, "server_out.log")
 LOG_ERR = os.path.join(SERVER_DIR, "server_err.log")

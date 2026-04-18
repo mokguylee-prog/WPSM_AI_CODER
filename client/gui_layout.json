@@ -1,7 +1,8 @@
 {
-  "geometry": "1456x753+404+61",
-  "v_ratio": 0.37376586741889983,
+  "geometry": "1526x784+143+93",
+  "v_ratio": 0.6143617021276596,
   "h_ratio": 0.16483516483516483,
   "open_folder": "D:\\work_ai2\\Robot_Dialog",
-  "always_approve": false
+  "always_approve": false,
+  "draft_command": "aaaa"
 }

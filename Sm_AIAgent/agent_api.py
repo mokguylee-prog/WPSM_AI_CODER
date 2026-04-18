@@ -17,7 +17,7 @@ def _dashboard_mod():
     """Find main api_server module to report request metrics."""
     import sys
 
-    for name in ("__main__", "scripts.api_server", "server.scripts.api_server", "api_server"):
+    for name in ("__main__", "scripts.web_server", "server.scripts.web_server", "web_server"):
         mod = sys.modules.get(name)
         if mod is not None and hasattr(mod, "begin_request"):
             return mod

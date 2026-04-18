@@ -6,6 +6,53 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $clientDir = Join-Path $scriptDir "client"
 $venvPython = Join-Path $scriptDir "venv\Scripts\python.exe"
 $venvPip = Join-Path $scriptDir "venv\Scripts\pip.exe"
+$guiExePath = Join-Path $clientDir "Sm_AiCoderClient.exe"
+$guiScriptPath = Join-Path $clientDir "gui_client.py"
+
+function Stop-RunningClient {
+    param(
+        [string]$ExePath,
+        [string]$ScriptPath
+    )
+
+    Write-Host "[2/6] 실행 중인 GUI 클라이언트 확인..."
+
+    $stopped = $false
+
+    $exeProcesses = Get-Process -Name "Sm_AiCoderClient" -ErrorAction SilentlyContinue |
+        Where-Object {
+            try {
+                $_.Path -and ([System.IO.Path]::GetFullPath($_.Path) -eq [System.IO.Path]::GetFullPath($ExePath))
+            } catch {
+                $false
+            }
+        }
+
+    foreach ($proc in $exeProcesses) {
+        Write-Host "      EXE 종료: PID $($proc.Id)"
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        $stopped = $true
+    }
+
+    $normalizedScriptPath = [System.IO.Path]::GetFullPath($ScriptPath)
+    $pyProcesses = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.CommandLine -and $_.CommandLine.Contains($normalizedScriptPath)
+        }
+
+    foreach ($proc in $pyProcesses) {
+        Write-Host "      Python GUI 종료: PID $($proc.ProcessId)"
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+        $stopped = $true
+    }
+
+    if ($stopped) {
+        Start-Sleep -Seconds 1
+        Write-Host "      실행 중인 클라이언트를 정리했습니다."
+    } else {
+        Write-Host "      실행 중인 클라이언트가 없습니다."
+    }
+}
 
 if (-not (Test-Path $venvPython)) {
     $venvPython = "python"
@@ -21,7 +68,7 @@ try {
     Write-Host "========================================"
     Write-Host ""
 
-    Write-Host "[1/5] 필수 패키지 확인..."
+    Write-Host "[1/6] 필수 패키지 확인..."
     $piCheck = & $venvPython -c "import PyInstaller" 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "      PyInstaller 없음 -> 설치 중..."
@@ -49,7 +96,10 @@ try {
     }
 
     Write-Host ""
-    Write-Host "[2/5] 이전 빌드 파일 정리..."
+    Stop-RunningClient -ExePath $guiExePath -ScriptPath $guiScriptPath
+
+    Write-Host ""
+    Write-Host "[3/6] 이전 빌드 파일 정리..."
     if (Test-Path "dist\Sm_AiCoderClient.exe") {
         Remove-Item "dist\Sm_AiCoderClient.exe" -Force
         Write-Host "      dist\Sm_AiCoderClient.exe 삭제"
@@ -64,14 +114,14 @@ try {
     }
 
     Write-Host ""
-    Write-Host "[3/5] 아이콘 생성..."
+    Write-Host "[4/6] 아이콘 생성..."
     & $venvPython ".\make_icon.py"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "      [경고] 아이콘 생성 실패 - 기본 아이콘으로 빌드합니다."
     }
 
     Write-Host ""
-    Write-Host "[4/5] TCL/TK 경로 확인..."
+    Write-Host "[5/6] TCL/TK 경로 확인..."
 
     $tclTkInfo = & $venvPython -c @"
 import sys, os
@@ -107,7 +157,7 @@ print(tk)
     }
 
     Write-Host ""
-    Write-Host "[5/5] PyInstaller 빌드 실행 중..."
+    Write-Host "[6/6] PyInstaller 빌드 실행 중..."
     Write-Host "      (완료까지 1~3분 정도 걸릴 수 있습니다)"
     Write-Host ""
 
@@ -144,7 +194,7 @@ print(tk)
     & $venvPython @buildArgs
 
     if ($LASTEXITCODE -eq 0) {
-        $dest = Join-Path $clientDir "Sm_AiCoderClient.exe"
+        $dest = $guiExePath
         Copy-Item "dist\Sm_AiCoderClient.exe" -Destination $dest -Force
         Write-Host ""
         Write-Host "========================================"

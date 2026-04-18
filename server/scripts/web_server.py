@@ -172,7 +172,7 @@ _active_cancel: Optional[threading.Event] = None
 _active_entry: Optional[dict] = None   # 현재 처리 중인 요청 엔트리
 _active_last_tick: float = 0.0
 _WATCHDOG_INTERVAL: float = 5.0
-_IDLE_CANCEL_S: float = 10.0
+_IDLE_CANCEL_S: float = 90.0   # CPU prefill이 느릴 수 있으므로 여유 있게 설정
 _LOCK_WAIT_S: float = 20.0
 
 
@@ -767,7 +767,7 @@ def save_request_snapshot(request_index: int):
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard():
+def serve_dashboard():
     return HTMLResponse(DASHBOARD_HTML)
 
 

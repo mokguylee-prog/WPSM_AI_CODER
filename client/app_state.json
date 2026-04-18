@@ -1,8 +1,24 @@
 {
-  "history": [],
-  "result_text": "⏳ 생성 중입니다...\n\nSm_AICoder ▶ ",
-  "copy_text": "",
-  "draft_command": "C 언어로  FFT계산 프로그램 작성",
+  "history": [
+    {
+      "role": "user",
+      "content": "aaaa"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm sorry, but I'm not sure what you're asking. Could you please provide more details or context?"
+    }
+  ],
+  "result_text": "",
+  "copy_text": "I'm sorry, but I'm not sure what you're asking. Could you please provide more details or context?",
+  "draft_command": "aaaa",
   "agent_mode": false,
-  "result_events": []
+  "open_folder": "D:\\work_ai2\\Robot_Dialog",
+  "result_events": [
+    {
+      "kind": "message",
+      "role": "assistant",
+      "content": "I'm sorry, but I'm not sure what you're asking. Could you please provide more details or context?"
+    }
+  ]
 }

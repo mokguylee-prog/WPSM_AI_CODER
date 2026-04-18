@@ -24,7 +24,13 @@ except Exception:
 API_URL = "http://localhost:8888"
 APP_ID = "sm.aicoder.client"
 ICON_FILE = "icon.ico"
-CLIENT_DIR = os.path.dirname(os.path.abspath(__file__))
+def get_app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CLIENT_DIR = get_app_dir()
 PROJECT_ROOT = os.path.dirname(CLIENT_DIR)
 
 DARK_BG  = "#0d1117"
@@ -92,6 +98,45 @@ def apply_window_icon(root: tk.Tk):
         pass
 
 
+def apply_windows_title_bar_style(root: tk.Tk):
+    if os.name != "nt":
+        return
+
+    try:
+        root.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        if not hwnd:
+            hwnd = root.winfo_id()
+
+        # Windows 10/11 DWM caption colors
+        DWMWA_BORDER_COLOR = 34
+        DWMWA_CAPTION_COLOR = 35
+        DWMWA_TEXT_COLOR = 36
+
+        def colorref(rgb_hex: str) -> ctypes.c_int:
+            rgb_hex = rgb_hex.lstrip("#")
+            r = int(rgb_hex[0:2], 16)
+            g = int(rgb_hex[2:4], 16)
+            b = int(rgb_hex[4:6], 16)
+            return ctypes.c_int((b << 16) | (g << 8) | r)
+
+        caption_color = colorref("#b91c1c")
+        text_color = colorref("#f8fafc")
+        border_color = colorref("#7f1d1d")
+
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_CAPTION_COLOR, ctypes.byref(caption_color), ctypes.sizeof(caption_color)
+        )
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_TEXT_COLOR, ctypes.byref(text_color), ctypes.sizeof(text_color)
+        )
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_BORDER_COLOR, ctypes.byref(border_color), ctypes.sizeof(border_color)
+        )
+    except Exception:
+        pass
+
+
 class ToolTip:
     def __init__(self, widget, text: str):
         self.widget = widget
@@ -130,6 +175,7 @@ class StarCoderGUI:
         self.root.configure(bg=DARK_BG)
         self.root.minsize(900, 640)
         apply_window_icon(self.root)
+        apply_windows_title_bar_style(self.root)
 
         self.history     = []
         self.temperature = tk.DoubleVar(value=0.2)
@@ -139,7 +185,10 @@ class StarCoderGUI:
         self._inflight: bool = False
         self._layout     = self._load_layout()
         self._state      = self._load_state()
-        self._open_folder = self._layout.get("open_folder", PROJECT_ROOT)
+        # state(매 저장)가 layout(앱 종료/리사이즈 시 저장)보다 최신일 수 있으므로
+        # state에 값이 있으면 state를 우선 사용한다.
+        _saved_folder = self._state.get("open_folder") or self._layout.get("open_folder") or PROJECT_ROOT
+        self._open_folder = _saved_folder
         self._attachments = []
         self._folder_rows = []
         self._tree_nodes = {}
@@ -196,11 +245,13 @@ class StarCoderGUI:
             for k, v in DEFAULT_LAYOUT.items():
                 data.setdefault(k, v)
             data.setdefault("open_folder", PROJECT_ROOT)
+            data.setdefault("draft_command", "")
             data.setdefault("always_approve", False)
             return data
         except Exception:
             data = dict(DEFAULT_LAYOUT)
             data["open_folder"] = PROJECT_ROOT
+            data["draft_command"] = ""
             data["always_approve"] = False
             return data
 
@@ -213,6 +264,7 @@ class StarCoderGUI:
             data.setdefault("copy_text", "")
             data.setdefault("draft_command", "")
             data.setdefault("agent_mode", False)
+            data.setdefault("open_folder", "")
             return data
         except Exception:
             return {
@@ -221,6 +273,7 @@ class StarCoderGUI:
                 "copy_text": "",
                 "draft_command": "",
                 "agent_mode": False,
+                "open_folder": "",
             }
 
     def _new_agent_session_id(self):
@@ -268,6 +321,8 @@ class StarCoderGUI:
         try:
             self._layout["geometry"] = self.root.winfo_geometry()
             self._layout["open_folder"] = self._open_folder or PROJECT_ROOT
+            if hasattr(self, "input_box"):
+                self._layout["draft_command"] = self.input_box.get("1.0", tk.END).rstrip("\n")
             self._layout["always_approve"] = self._always_approve
             with open(LAYOUT_FILE, "w", encoding="utf-8") as f:
                 json.dump(self._layout, f, ensure_ascii=False, indent=2)
@@ -275,23 +330,30 @@ class StarCoderGUI:
             pass
 
     def _save_state(self):
+        if hasattr(self, "input_box"):
+            self._state["draft_command"] = self.input_box.get("1.0", tk.END).rstrip("\n")
+        if hasattr(self, "copy_box"):
+            self._state["copy_text"] = self.copy_box.get("1.0", tk.END).rstrip("\n")
+        self._state["agent_mode"] = self._agent_mode
+        self._state["open_folder"] = self._open_folder or ""
+
+        # Try serializing complex fields; fall back to empty on failure
         try:
-            if hasattr(self, "input_box"):
-                self._state["draft_command"] = self.input_box.get("1.0", tk.END).rstrip("\n")
-            if hasattr(self, "copy_box"):
-                self._state["copy_text"] = self.copy_box.get("1.0", tk.END).rstrip("\n")
             self._state["history"] = self.history
-            self._state["agent_mode"] = self._agent_mode
             self._state["result_events"] = self._result_events
+            json.dumps(self._state)  # validate before writing
+        except Exception:
+            self._state["history"] = []
+            self._state["result_events"] = []
+
+        try:
             with open(STATE_FILE, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, ensure_ascii=False, indent=2)
-            if hasattr(self, "folder_tree"):
-                self._refresh_folder_view(select_path=self._open_folder)
         except Exception:
             pass
 
     def _restore_state(self):
-        draft = self._state.get("draft_command", "")
+        draft = self._state.get("draft_command") or self._layout.get("draft_command", "")
         if draft and hasattr(self, "input_box"):
             self.input_box.delete("1.0", tk.END)
             self.input_box.insert("1.0", draft)
@@ -341,9 +403,8 @@ class StarCoderGUI:
         self._schedule_layout_save()
 
     def _on_close(self):
-        self._save_layout()
-        self._refresh_folder_view(select_path=self._open_folder)
         self._save_state()
+        self._save_layout()
         self.root.destroy()
 
     def _on_configure(self, event):
@@ -577,17 +638,39 @@ class StarCoderGUI:
         btn_row = tk.Frame(frame, bg=PANEL_BG, pady=6, padx=8)
         btn_row.pack(side=tk.BOTTOM, fill=tk.X)
 
-        left_actions = tk.Frame(btn_row, bg=PANEL_BG)
-        left_actions.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # RIGHT 아이템을 먼저 pack해야 LEFT가 expand해도 겹치지 않는다.
+        self.turn_lbl = tk.Label(btn_row, text="대화: 0턴",
+                                 fg=MUTED, bg=PANEL_BG,
+                                 font=("Segoe UI", 9))
+        self.turn_lbl.pack(side=tk.RIGHT, padx=(8, 0))
 
-        center_actions = tk.Frame(btn_row, bg=PANEL_BG)
-        center_actions.pack(side=tk.LEFT)
+        self.mode_indicator = tk.Label(
+            btn_row, text="", fg=MUTED, bg=PANEL_BG,
+            font=("Segoe UI", 8),
+        )
+        self.mode_indicator.pack(side=tk.RIGHT, padx=(0, 4))
 
-        right_actions = tk.Frame(btn_row, bg=PANEL_BG)
-        right_actions.pack(side=tk.RIGHT)
+        self.mode_btn = tk.Button(
+            btn_row, text="채팅 모드", command=self._toggle_mode,
+            bg="#1a1e2e", fg="#bc8cff", relief=tk.FLAT,
+            font=("Segoe UI", 9, "bold"), padx=12, pady=3,
+            cursor="hand2",
+        )
+        self.mode_btn.pack(side=tk.RIGHT, padx=(0, 4))
+        ToolTip(self.mode_btn, "채팅 모드 / 에이전트 모드 전환")
 
+        self.approve_btn = tk.Button(
+            btn_row, text="권한허용", command=self._approve_pending_command,
+            bg=INPUT_BG, fg=MUTED, relief=tk.FLAT,
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            state=tk.DISABLED,
+        )
+        self.approve_btn.pack(side=tk.RIGHT, padx=(0, 8))
+        ToolTip(self.approve_btn, "에이전트 권한 허용")
+
+        # LEFT 아이템
         self.send_btn = tk.Button(
-            left_actions, text="전송  (Ctrl+Enter)", command=self._send,
+            btn_row, text="전송  (Ctrl+Enter)", command=self._send,
             bg=BLUE, fg=DARK_BG, relief=tk.FLAT,
             font=("Segoe UI", 10, "bold"), padx=14, pady=3,
             cursor="hand2",
@@ -596,52 +679,20 @@ class StarCoderGUI:
         ToolTip(self.send_btn, "명령 전송")
 
         tk.Button(
-            left_actions, text="지우기",
+            btn_row, text="지우기",
             command=lambda: (self.input_box.delete("1.0", tk.END), self._schedule_layout_save()),
             bg=INPUT_BG, fg=MUTED, relief=tk.FLAT,
             font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
-        ).pack(side=tk.LEFT)
-
-        delete_group = tk.Frame(left_actions, bg=PANEL_BG)
-        delete_group.pack(side=tk.LEFT, padx=(2, 0))
+        ).pack(side=tk.LEFT, padx=(0, 2))
 
         self.cancel_btn = tk.Button(
-            delete_group, text="취소", command=self._cancel_current_job,
+            btn_row, text="취소", command=self._cancel_current_job,
             bg=INPUT_BG, fg=MUTED, relief=tk.FLAT,
             font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
             state=tk.DISABLED,
         )
         self.cancel_btn.pack(side=tk.LEFT)
         ToolTip(self.cancel_btn, "현재 요청 취소")
-
-        self.approve_btn = tk.Button(
-            center_actions, text="권한허용", command=self._approve_pending_command,
-            bg=INPUT_BG, fg=MUTED, relief=tk.FLAT,
-            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
-            state=tk.DISABLED,
-        )
-        self.approve_btn.pack(side=tk.LEFT, padx=(0, 6))
-        ToolTip(self.approve_btn, "에이전트 권한 허용")
-
-        self.mode_btn = tk.Button(
-            center_actions, text="채팅 모드", command=self._toggle_mode,
-            bg="#1a1e2e", fg="#bc8cff", relief=tk.FLAT,
-            font=("Segoe UI", 9, "bold"), padx=12, pady=3,
-            cursor="hand2",
-        )
-        self.mode_btn.pack(side=tk.LEFT)
-        ToolTip(self.mode_btn, "채팅 모드 / 에이전트 모드 전환")
-
-        self.mode_indicator = tk.Label(
-            center_actions, text="", fg=MUTED, bg=PANEL_BG,
-            font=("Segoe UI", 8),
-        )
-        self.mode_indicator.pack(side=tk.LEFT, padx=(6, 0))
-
-        self.turn_lbl = tk.Label(right_actions, text="대화: 0턴",
-                                 fg=MUTED, bg=PANEL_BG,
-                                 font=("Segoe UI", 9))
-        self.turn_lbl.pack(side=tk.RIGHT)
 
         self.input_box = tk.Text(
             frame, bg=INPUT_BG, fg=TEXT, insertbackground=TEXT,
@@ -1570,8 +1621,12 @@ class StarCoderGUI:
         self._set_text(self.copy_box, "")
 
     def _done_sending(self, epoch: int | None = None):
+        # epoch 불일치라도 실제로 다른 요청이 in-flight 중이 아니면 UI를 정상화한다.
+        # _set_online의 헬스체크 오탐이 epoch를 범프했을 때 _inflight가 영구 True로
+        # 남는 버그를 방어하는 마지막 안전망.
         if epoch is not None and not self._is_epoch_current(epoch):
-            return
+            if self._inflight or self._sending:
+                return  # 진짜로 새 요청이 in-flight 중이므로 건너뜀
         self._sending = False
         self._inflight = False  # P4-3: in-flight 해제 — 다음 Send 클릭 허용
         # 모드별로 원래 버튼 색상 복원
@@ -1735,6 +1790,7 @@ class StarCoderGUI:
         self.folder_path_lbl.config(text=self._open_folder)
         self._context_injected = False   # P2-1: 새 폴더 열면 컨텍스트 플래그 리셋
         self._refresh_folder_view(select_path=self._open_folder)
+        self._save_state()
         self._save_layout()
 
     def _create_file(self):
@@ -2169,8 +2225,12 @@ class StarCoderGUI:
         if online:
             reconnecting = not self._last_server_online
             if reconnecting:
-                self._bump_reconnect_epoch()
-                self._mark_agent_session_dirty()
+                # 요청이 진행 중이면 epoch를 범프하지 않는다.
+                # 헬스체크 일시 실패(오탐)로 epoch가 바뀌면 _done_sending이
+                # 스테일 epoch로 판정되어 _inflight가 영원히 True로 남는 버그 방지.
+                if not self._inflight:
+                    self._bump_reconnect_epoch()
+                    self._mark_agent_session_dirty()
             self._last_server_online = True
             self._server_fail_count = 0
             self._agent_fail_count = 0
@@ -2182,7 +2242,7 @@ class StarCoderGUI:
                 self.status_lbl.config(fg=MUTED, text="Server Ready - loading model...")
         else:
             self._server_fail_count += 1
-            if self._server_fail_count < 3:
+            if self._server_fail_count < 5:  # 오탐 감소: 3→5회 연속 실패 후 오프라인 판정
                 return
             self._last_server_online = False
             self.dot.config(fg=RED)

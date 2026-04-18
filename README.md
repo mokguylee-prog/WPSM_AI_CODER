@@ -69,18 +69,28 @@ venv\Scripts\python.exe server\scripts\download_model.py
 ## 실행 방법
 
 ```powershell
-# 서버 시작 (백그라운드)
-.\\start_server.ps1
-
 # GUI 클라이언트 실행
-.\\start_gui.ps1
-
-# CLI 클라이언트 실행
+# 서버가 꺼져 있으면 start_client.ps1가 서버도 함께 시작합니다.
 .\\start_client.ps1
+
+# 서버만 따로 시작
+.\\start_server.ps1
 
 # 서버 종료
 .\\stop_server.ps1
 ```
+
+기본 실행은 `.\start_client.ps1`를 사용하면 됩니다.
+
+- `start_client.ps1`는 서버 상태를 먼저 확인한 뒤, 서버가 꺼져 있으면 백그라운드에서 자동으로 시작합니다.
+- GUI 클라이언트는 `client/Sm_AiCoderClient.exe`가 있으면 EXE를 실행하고, 없으면 `client/gui_client.py`를 실행합니다.
+- 대시보드는 `http://localhost:8888` 에서 확인할 수 있습니다.
+
+### GUI 상태 복원
+
+- Open Folder로 마지막에 열었던 폴더 경로는 `client/gui_layout.json`에 저장됩니다.
+- 명령 입력창의 임시 입력 내용은 `client/app_state.json`에 저장되고, 다음 실행 시 복원됩니다.
+- EXE로 실행 중이라면 `gui_client.py` 수정 후에는 EXE를 다시 빌드해야 변경 사항이 반영됩니다.
 
 웹 대시보드: `http://localhost:8888`
 
@@ -167,8 +177,7 @@ WP_AI_CODER/
 ├── build_client.ps1             # GUI EXE 빌드 스크립트
 ├── start_server.ps1             # 서버 시작
 ├── stop_server.ps1              # 서버 종료
-├── start_gui.ps1                # GUI 클라이언트 시작
-├── start_client.ps1             # CLI 클라이언트 시작
+├── start_client.ps1             # 기본 실행 스크립트 (서버 확인 + GUI 클라이언트 실행)
 ├── docs/                        # 설치/사용/API 문서
 └── image/                       # 스크린샷
 ```
