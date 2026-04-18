@@ -1881,30 +1881,65 @@ class StarCoderGUI:
         except Exception as e:
             return f"{os.path.basename(path)}\nPreview unavailable: {e}"
 
+    def _relevant_files(self, prompt: str) -> list[str]:
+        """프롬프트와 관련 있는 파일만 반환한다.
+
+        관련성 판단 기준 (하나라도 해당하면 포함):
+        1. 파일명(확장자 포함/제외)이 프롬프트에 언급됨
+        2. 프롬프트에 언급된 확장자와 일치 (최대 3개)
+        3. 사용자가 명시적으로 선택한 파일(_selected_file_path)은 별도 처리
+        """
+        if not self._folder_rows:
+            return []
+
+        prompt_lower = prompt.lower()
+        matched: list[str] = []
+
+        # 프롬프트에 언급된 확장자 수집 (.py .js .cs 등)
+        import re as _re
+        mentioned_exts = set(_re.findall(r'\.\w+', prompt_lower))
+
+        for path in self._folder_rows:
+            if not os.path.isfile(path):
+                continue
+            basename = os.path.basename(path)
+            name_no_ext = os.path.splitext(basename)[0].lower()
+            ext = os.path.splitext(basename)[1].lower()
+
+            # 파일명이 프롬프트에 직접 언급됨
+            if basename.lower() in prompt_lower or name_no_ext in prompt_lower:
+                matched.append(path)
+                continue
+
+            # 확장자가 언급됨 (같은 확장자 최대 3개)
+            if ext in mentioned_exts:
+                same_ext = [p for p in matched if os.path.splitext(p)[1].lower() == ext]
+                if len(same_ext) < 3:
+                    matched.append(path)
+
+        return matched[:10]  # 최대 10개
+
     def _build_prompt_with_context(self, prompt: str) -> str:
-        # P2-1: 첫 턴(또는 새 폴더)에만 폴더 트리/파일 요약을 주입한다.
-        # 두 번째 턴부터는 선택 파일 내용과 첨부만 포함.
         base = self._open_folder or PROJECT_ROOT
         lines: list[str] = []
 
-        if not self._context_injected:
-            # ── 첫 턴 전용 컨텍스트 ──────────────────────────────
-            lines += [f"[OpenFolder] {base}", "[Folder files]"]
-            for row in self._folder_rows[:50]:          # P2-2: 200→50
+        # 관련 파일만 주입 (전체 폴더 트리 무조건 주입 제거)
+        relevant = self._relevant_files(prompt)
+        if relevant:
+            lines.append(f"[OpenFolder] {base}")
+            lines.append("[Relevant files]")
+            for path in relevant:
                 try:
-                    rel = os.path.relpath(row, base)
+                    rel = os.path.relpath(path, base)
                 except Exception:
-                    rel = row
+                    rel = path
                 lines.append(f"- {rel}")
-            lines.append("")
-            lines.append("[Folder summaries]")
-            for path in self._folder_rows[:5]:          # P2-2: 12→5
-                if os.path.isfile(path):
-                    lines.append(self._read_file_summary(path))
-                    lines.append("")
-            self._context_injected = True
+            lines.append("[Relevant file summaries]")
+            for path in relevant[:3]:
+                lines.append(self._read_file_summary(path))
+                lines.append("")
 
-        # ── 매 턴 포함: 선택 파일 내용 ──────────────────────────
+        # 선택 파일 내용 (사용자가 명시적으로 연 파일)
         if self._selected_file_path:
             lines.append(f"[Selected file] {self._selected_file_path}")
             try:
@@ -1916,6 +1951,7 @@ class StarCoderGUI:
                 lines.append(editor_text)
                 lines.append("")
 
+        # 첨부 파일 목록
         if self._attachments:
             lines.append("[Attachments]")
             lines.extend(f"- {p}" for p in self._attachments)
