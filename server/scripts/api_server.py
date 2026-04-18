@@ -673,7 +673,8 @@ def cancel_inference():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": model_name}
+    uptime = int(time.time() - start_time) if start_time else 0
+    return {"status": "ok", "model": model_name, "uptime_sec": uptime}
 
 
 @app.get("/stats")
