@@ -213,6 +213,9 @@ class StarCoderGUI:
                 "agent_mode": False,
             }
 
+    def _new_agent_session_id(self):
+        self._agent_session_id = f"gui-{uuid.uuid4().hex[:12]}"
+
     def _save_layout(self):
         try:
             self._layout["geometry"] = self.root.winfo_geometry()
@@ -1857,19 +1860,23 @@ class StarCoderGUI:
         self.result_box.config(state=tk.DISABLED)
         self._set_text(self.copy_box, "")
         self.elapsed_lbl.config(text="")
-        self.turn_lbl.config(text="대화: 0턴")
+        self.turn_lbl.config(text="턴 0")
 
-        # 에이전트 세션도 초기화
+        # 에이전트 세션을 새로 시작한다.
         if self._agent_mode:
+            old_session_id = self._agent_session_id
+            self._new_agent_session_id()
+
             def reset():
                 try:
                     requests.post(
                         f"{API_URL}/agent/reset",
-                        params={"session_id": self._agent_session_id},
+                        params={"session_id": old_session_id},
                         timeout=5,
                     )
                 except Exception:
                     pass
+
             threading.Thread(target=reset, daemon=True).start()
 
     def _run_ps1(self, script_name):
@@ -1914,21 +1921,23 @@ class StarCoderGUI:
 
     def _set_online(self, online, model, agent_ok=False):
         if online:
+            if not self._last_server_online:
+                self._new_agent_session_id()
+            self._last_server_online = True
             self._server_fail_count = 0
             self._agent_fail_count = 0 if agent_ok else self._agent_fail_count + 1
             self._agent_available = agent_ok
             self.dot.config(fg=GREEN)
             agent_tag = " + Agent" if self._agent_available else ""
-            self.status_lbl.config(fg=MUTED, text=f"?⑤씪?? ?? {model}{agent_tag}")
+            self.status_lbl.config(fg=MUTED, text=f"서버 온라인 - {model}{agent_tag}")
         else:
             self._server_fail_count += 1
             if self._server_fail_count < 3:
                 return
+            self._last_server_online = False
             self.dot.config(fg=RED)
-            self.status_lbl.config(fg=RED, text="?쒕쾭 ?ㅽ봽?쇱씤 ??localhost:8888")
+            self.status_lbl.config(fg=RED, text="서버 오프라인 - localhost:8888")
             self._agent_available = False
-
-
 if __name__ == "__main__":
     configure_windows_app_id()
     root = tk.Tk()
