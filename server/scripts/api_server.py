@@ -158,6 +158,14 @@ stats = {
 recent_requests: deque = deque(maxlen=20)
 _req_counter = itertools.count(1)
 
+# ---------------------------------------------------------------------------
+# LLM 직렬화 — llama-cpp 는 스레드 안전하지 않으므로 한 번에 하나만 실행
+#   _llm_lock  : 추론 중 잠금. acquire 실패 시 즉시 503 반환 (큐에 쌓지 않음)
+#   _stream_cancel : 스트리밍 중 클라이언트 끊김을 worker 스레드에 전달
+# ---------------------------------------------------------------------------
+_llm_lock: threading.Lock = threading.Lock()
+_stream_cancel: threading.Event = threading.Event()
+
 
 def write_log(entry: dict):
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -374,6 +382,8 @@ def load_model():
 def generate(req: GenerateRequest):
     if llm is None:
         raise HTTPException(503, "Model is loading")
+    if not _llm_lock.acquire(blocking=False):
+        raise HTTPException(503, "Server busy: inference in progress. Please retry shortly.")
 
     messages = [{"role": "system", "content": req.system}, {"role": "user", "content": req.prompt}]
     entry = begin_request(req.prompt, kind="generate")
@@ -381,8 +391,6 @@ def generate(req: GenerateRequest):
     try:
         max_tokens = _clamp_max_tokens(messages, req.max_tokens)
         t0 = time.time()
-        # P5-2: /generate 는 항상 첫 턴(big model)
-        # P5-3: prompt cache flag is logged but not passed to create_chat_completion
         result = _create_chat_completion_safe(_route_llm(0), _chat_kwargs(dict(
             messages=messages,
             max_tokens=max_tokens,
@@ -406,12 +414,16 @@ def generate(req: GenerateRequest):
         traceback.print_exc()
         fail_request(entry, f"{type(e).__name__}: {e}")
         raise HTTPException(500, f"Generation failed: {type(e).__name__}: {e}")
+    finally:
+        _llm_lock.release()
 
 
 @app.post("/chat")
 def chat(req: ChatRequest):
     if llm is None:
         raise HTTPException(503, "Model is loading")
+    if not _llm_lock.acquire(blocking=False):
+        raise HTTPException(503, "Server busy: inference in progress. Please retry shortly.")
 
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
     if not messages or messages[0]["role"] != "system":
@@ -465,6 +477,8 @@ def chat(req: ChatRequest):
         traceback.print_exc()
         fail_request(entry, f"{type(e).__name__}: {e}")
         raise HTTPException(500, f"Generation failed: {type(e).__name__}: {e}")
+    finally:
+        _llm_lock.release()
 
 
 @app.post("/chat/stream")
@@ -472,10 +486,13 @@ def chat_stream(req: ChatStreamRequest):
     """NDJSON 스트리밍 /chat 엔드포인트.
 
     P4-2: idle-timeout — 마지막 토큰 이후 IDLE_TIMEOUT_S 초 무응답 시 연결을 끊는다.
-          300s 단일 timeout 방식은 폐기되었다.
+    클라이언트 강제 종료 시: gen()에서 GeneratorExit → _stream_cancel 세트 →
+    worker가 토큰 루프를 중단 → _llm_lock 해제 → 새 요청 즉시 수락 가능.
     """
     if llm is None:
         raise HTTPException(503, "Model is loading")
+    if not _llm_lock.acquire(blocking=False):
+        raise HTTPException(503, "Server busy: inference in progress. Please retry shortly.")
 
     # P4-2: idle-timeout 상수 — AgentLoop.IDLE_TIMEOUT_S 와 동일 값 사용
     IDLE_TIMEOUT_S: float = 60.0
@@ -485,18 +502,18 @@ def chat_stream(req: ChatStreamRequest):
         messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
 
     user_msgs = [m.content for m in req.messages if m.role == "user"]
-    # P6-3: 요청자가 kind 를 지정한 경우("agent-step") 그대로 기록한다.
     entry = begin_request(user_msgs[-1] if user_msgs else "", kind=req.kind)
     q: "queue.Queue[object]" = queue.Queue()
     done = object()
+
+    # 클라이언트 끊김을 worker 에 알리는 per-request 취소 이벤트
+    cancel_event = threading.Event()
 
     def worker():
         try:
             max_tokens = _clamp_max_tokens(messages, req.max_tokens)
             t0 = time.time()
             chunks = []
-            # P5-2: turn_index 로 big/small 모델 선택
-            # P5-3: prompt cache flag is logged but not passed to create_chat_completion
             active_llm = _route_llm(req.turn_index)
             stream = _create_chat_completion_safe(
                 active_llm,
@@ -509,6 +526,10 @@ def chat_stream(req: ChatStreamRequest):
                 )),
             )
             for piece in stream:
+                # 클라이언트가 끊기면 루프 중단 — llama-cpp 제너레이터도 close()됨
+                if cancel_event.is_set():
+                    fail_request(entry, "cancelled: client disconnected")
+                    return
                 delta = piece["choices"][0].get("delta", {})
                 token = delta.get("content", "")
                 if token:
@@ -526,29 +547,38 @@ def chat_stream(req: ChatStreamRequest):
             q.put({"type": "error", "error": f"{type(e).__name__}: {e}"})
         finally:
             q.put(done)
+            # worker 종료 시 항상 락 해제 — 새 요청이 대기 없이 들어올 수 있음
+            try:
+                _llm_lock.release()
+            except RuntimeError:
+                pass  # 이미 해제된 경우 무시
 
     threading.Thread(target=worker, daemon=True).start()
 
     def gen():
-        last_activity = time.monotonic()  # P4-2: idle-timeout 기준점
-        while True:
-            try:
-                item = q.get(timeout=1.0)
-                last_activity = time.monotonic()  # 데이터 수신 → 리셋
-            except queue.Empty:
-                # P4-2: idle-timeout 검사
-                idle = time.monotonic() - last_activity
-                if idle > IDLE_TIMEOUT_S:
-                    yield json.dumps(
-                        {"type": "error", "error": f"idle_timeout after {idle:.0f}s"},
-                        ensure_ascii=False,
-                    ) + "\n"
+        last_activity = time.monotonic()
+        try:
+            while True:
+                try:
+                    item = q.get(timeout=1.0)
+                    last_activity = time.monotonic()
+                except queue.Empty:
+                    idle = time.monotonic() - last_activity
+                    if idle > IDLE_TIMEOUT_S:
+                        cancel_event.set()
+                        yield json.dumps(
+                            {"type": "error", "error": f"idle_timeout after {idle:.0f}s"},
+                            ensure_ascii=False,
+                        ) + "\n"
+                        break
+                    yield json.dumps({"type": "heartbeat", "ts": time.time()}, ensure_ascii=False) + "\n"
+                    continue
+                if item is done:
                     break
-                yield json.dumps({"type": "heartbeat", "ts": time.time()}, ensure_ascii=False) + "\n"
-                continue
-            if item is done:
-                break
-            yield json.dumps(item, ensure_ascii=False) + "\n"
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+        except GeneratorExit:
+            # 클라이언트 강제 종료 — worker 에 취소 신호 전달
+            cancel_event.set()
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
