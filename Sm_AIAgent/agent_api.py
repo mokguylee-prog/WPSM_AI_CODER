@@ -56,6 +56,11 @@ def _estimate_tokens(text: str) -> int:
 router = APIRouter(prefix="/agent", tags=["agent"])
 _sessions: dict[str, AgentLoop] = {}
 _session_cancel_flags: dict[str, bool] = {}
+_session_last_seen: dict[str, float] = {}
+_sessions_lock = threading.RLock()
+SESSION_IDLE_TIMEOUT_S = 15 * 60
+SESSION_SWEEP_INTERVAL_S = 60
+_last_session_sweep = 0.0
 
 
 class AgentRequest(BaseModel):
@@ -94,31 +99,64 @@ def _get_or_create_agent(
     def on_step(step):
         steps.append(step)
 
-    if session_id not in _sessions:
-        agent = AgentLoop(
-            api_url=api_url,
-            max_iterations=max_iterations,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            working_dir=working_dir,
-            on_step=on_step,
-        )
-        _sessions[session_id] = agent
-    else:
-        agent = _sessions[session_id]
-        agent.on_step = on_step
-        agent.max_iterations = max_iterations
-        agent.temperature = temperature
-        agent.max_tokens = max_tokens
-    _session_cancel_flags.setdefault(session_id, False)
+    now = time.time()
+    with _sessions_lock:
+        agent = _sessions.get(session_id)
+        if agent is None:
+            agent = AgentLoop(
+                api_url=api_url,
+                max_iterations=max_iterations,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                working_dir=working_dir,
+                on_step=on_step,
+            )
+            _sessions[session_id] = agent
+        else:
+            agent.on_step = on_step
+            agent.max_iterations = max_iterations
+            agent.temperature = temperature
+            agent.max_tokens = max_tokens
+        _session_cancel_flags.setdefault(session_id, False)
+        _session_last_seen[session_id] = now
 
     return agent, steps
+
+
+def _touch_session(session_id: str):
+    with _sessions_lock:
+        _session_last_seen[session_id] = time.time()
+
+
+def _cleanup_expired_sessions():
+    global _last_session_sweep
+    now = time.time()
+    if now - _last_session_sweep < SESSION_SWEEP_INTERVAL_S:
+        return
+    _last_session_sweep = now
+
+    expired: list[str] = []
+    with _sessions_lock:
+        for sid, last_seen in list(_session_last_seen.items()):
+            if now - last_seen > SESSION_IDLE_TIMEOUT_S:
+                expired.append(sid)
+
+        for sid in expired:
+            agent = _sessions.pop(sid, None)
+            _session_cancel_flags.pop(sid, None)
+            _session_last_seen.pop(sid, None)
+            if agent is not None:
+                try:
+                    agent.reset()
+                except Exception:
+                    pass
 
 
 @router.post("/run", response_model=AgentResponse)
 def agent_run(req: AgentRequest):
     """Run the agent loop and return final answer."""
     api_url = "http://localhost:8888"
+    _cleanup_expired_sessions()
 
     agent, steps = _get_or_create_agent(
         session_id=req.session_id,
@@ -142,6 +180,7 @@ def agent_run(req: AgentRequest):
             elapsed = int((time.time() - t0) * 1000)
         finally:
             os.chdir(original_dir)
+            _touch_session(req.session_id)
     except Exception as e:
         fail_request(entry, f"{type(e).__name__}: {e}")
         raise HTTPException(500, f"에이전트 실행 오류: {type(e).__name__}: {e}")
@@ -160,6 +199,7 @@ def agent_run(req: AgentRequest):
 def agent_stream(req: AgentRequest):
     """Run agent loop as NDJSON streaming response."""
     api_url = "http://localhost:8888"
+    _cleanup_expired_sessions()
 
     q: "queue.Queue[object]" = queue.Queue()
     _DONE = object()
@@ -197,6 +237,7 @@ def agent_stream(req: AgentRequest):
                 os.chdir(original_dir)
             except Exception:
                 pass
+            _touch_session(req.session_id)
             q.put(_DONE)
 
     threading.Thread(target=worker, daemon=True).start()
@@ -230,8 +271,10 @@ def agent_stream(req: AgentRequest):
 
 @router.post("/cancel")
 def agent_cancel(session_id: str = "default"):
-    _session_cancel_flags[session_id] = True
-    agent = _sessions.get(session_id)
+    with _sessions_lock:
+        _session_cancel_flags[session_id] = True
+        agent = _sessions.get(session_id)
+        _session_last_seen[session_id] = time.time()
     if agent is not None:
         agent.cancel()
     return {"status": "ok", "session_id": session_id}
@@ -262,22 +305,32 @@ def agent_approve(req: ApprovalRequest):
 @router.post("/reset")
 def agent_reset(session_id: str = "default"):
     """Reset a single agent session."""
-    if session_id in _sessions:
-        _sessions[session_id].reset()
-        del _sessions[session_id]
+    with _sessions_lock:
+        agent = _sessions.pop(session_id, None)
+        _session_cancel_flags.pop(session_id, None)
+        _session_last_seen.pop(session_id, None)
+    if agent is not None:
+        agent.reset()
     return {"status": "ok", "session_id": session_id}
 
 
 @router.get("/sessions")
 def agent_sessions():
     """Return active sessions summary."""
-    return {
-        "sessions": [
+    _cleanup_expired_sessions()
+    now = time.time()
+    with _sessions_lock:
+        sessions = [
             {
                 "session_id": sid,
                 "turns": agent.context.turn_count,
                 "goal": agent.context.work_state.goal,
+                "last_seen_sec": round(now - _session_last_seen.get(sid, now), 1),
+                "idle_timeout_sec": SESSION_IDLE_TIMEOUT_S,
             }
             for sid, agent in _sessions.items()
         ]
+    return {
+        "sessions": sessions,
+        "session_idle_timeout_sec": SESSION_IDLE_TIMEOUT_S,
     }

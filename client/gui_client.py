@@ -10,6 +10,7 @@ import json
 import sys
 import time
 import ctypes
+import uuid
 from pathlib import Path
 
 try:
@@ -154,11 +155,13 @@ class StarCoderGUI:
         self._agent_step_buffer = []
         self._buffer_flush_job = None
         self._context_injected = False   # P2-1: 첫 턴 1회만 컨텍스트 주입 플래그
+        self._server_fail_count = 0
+        self._agent_fail_count = 0
 
         # 에이전트 모드
         self._agent_mode = bool(self._state.get("agent_mode", False))
         self._agent_available = False
-        self._agent_session_id = "gui-default"
+        self._agent_session_id = f"gui-{uuid.uuid4().hex[:12]}"
 
         # 저장된(또는 기본) 창 크기 적용
         self.root.geometry(self._layout["geometry"])
@@ -791,6 +794,8 @@ class StarCoderGUI:
             if saved:
                 self._select_tree_path(os.path.dirname(saved[0]))
             self._context_injected = False
+            self._server_fail_count = 0
+            self._agent_fail_count = 0
             self.result_box.config(state=tk.NORMAL)
             self.result_box.insert(tk.END, "\n\n[Saved files]\n", "agent_ok")
             for path in saved:
@@ -883,10 +888,11 @@ class StarCoderGUI:
         # P4-3: in-flight 가드 — 이미 요청이 진행 중이면 두 번째 클릭을 차단한다.
         # 수동 검증 시나리오: Send 버튼을 연속으로 두 번 클릭하면 첫 번째만 처리되고
         # 두 번째는 여기서 즉시 반환되어 서버에 요청이 중복 전송되지 않는다.
-        if self._inflight:
+        if self._inflight or self._sending:
             return
-        if self._sending:
-            return
+        if self._active_stream_response is not None:
+            self._cleanup_stream_state()
+            time.sleep(0.15)
         prompt = self.input_box.get("1.0", tk.END).strip()
         if not prompt:
             return
@@ -934,8 +940,11 @@ class StarCoderGUI:
             threading.Thread(target=self._run_chat, args=(prompt,), daemon=True).start()
 
     def _run_chat(self, prompt: str):
-        """채팅 모드 — 기존 /chat 엔드포인트 호출"""
+        """?? ?? ? ?? /chat ????? ??"""
         try:
+            if self._active_stream_response is not None:
+                self._cleanup_stream_state()
+                time.sleep(0.15)
             payload = {
                 "messages": self.history + [{"role": "user", "content": prompt}],
                 "temperature": self.temperature.get(),
@@ -973,15 +982,24 @@ class StarCoderGUI:
                     elif t == "error":
                         self.root.after(0, lambda m=evt.get("error", "error"): self._on_error(m))
                         break
+        except (requests.exceptions.ConnectionError, ConnectionResetError, OSError) as e:
+            msg = str(e)
+            if "10054" in msg or "Connection broken" in msg or "??? ?????" in msg:
+                self.root.after(0, self._cleanup_stream_state)
+                return
+            self.root.after(0, lambda err=msg: self._on_error(err))
         except Exception as e:
             self.root.after(0, lambda err=str(e): self._on_error(err))
         finally:
-            self._active_stream_response = None
+            self._cleanup_stream_state()
             self.root.after(0, self._done_sending)
 
     def _run_agent(self, prompt: str):
-        """에이전트 모드 — /agent/stream 엔드포인트 스트리밍 수신"""
+        """???? ?? ? /agent/stream ????? ???? ??"""
         try:
+            if self._active_stream_response is not None:
+                self._cleanup_stream_state()
+                time.sleep(0.15)
             payload = {
                 "message": prompt,
                 "session_id": self._agent_session_id,
@@ -991,7 +1009,7 @@ class StarCoderGUI:
                 "max_tokens": self.max_tokens.get(),
             }
 
-            # 시작 시: ③ 창에 사용자 입력 + 실행 과정 헤더 먼저 그린다
+            # ?? ?: ? ?? ??? ?? + ?? ?? ?? ?? ???
             self.root.after(0, lambda: self._agent_stream_begin(prompt))
 
             with requests.post(
@@ -1026,13 +1044,19 @@ class StarCoderGUI:
                         elapsed = evt.get("elapsed_ms", 0)
                         self.root.after(0, lambda a=answer, e=elapsed, n=getattr(self, "_agent_step_count", 0): self._agent_stream_final(a, e, n))
                     elif t == "error":
-                        err = evt.get("error", "알 수 없는 오류")
+                        err = evt.get("error", "? ? ?? ??")
                         self.root.after(0, lambda m=err: self._on_error(m))
 
+        except (requests.exceptions.ConnectionError, ConnectionResetError, OSError) as e:
+            msg = str(e)
+            if "10054" in msg or "Connection broken" in msg or "??? ?????" in msg:
+                self.root.after(0, self._cleanup_stream_state)
+                return
+            self.root.after(0, lambda err=msg: self._on_error(err))
         except Exception as e:
             self.root.after(0, lambda err=str(e): self._on_error(err))
         finally:
-            self._active_stream_response = None
+            self._cleanup_stream_state()
             self.root.after(0, self._done_sending)
 
     def _begin_busy_indicator(self, label: str):
@@ -1052,6 +1076,27 @@ class StarCoderGUI:
         if self._buffer_flush_job is not None:
             return
         self._buffer_flush_job = self.root.after(50, self._flush_stream_buffers)
+
+    def _cancel_buffer_flush(self):
+        job = self._buffer_flush_job
+        self._buffer_flush_job = None
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+
+    def _cleanup_stream_state(self):
+        self._cancel_buffer_flush()
+        self._chat_text_buffer.clear()
+        self._agent_step_buffer.clear()
+        stream = self._active_stream_response
+        self._active_stream_response = None
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
 
     def _flush_stream_buffers(self):
         self._buffer_flush_job = None
@@ -1116,13 +1161,7 @@ class StarCoderGUI:
 
     def _cancel_current_job(self):
         self._cancel_requested = True
-        stream = self._active_stream_response
-        if stream is not None:
-            try:
-                stream.close()
-            except Exception:
-                pass
-            self._active_stream_response = None
+        self._cleanup_stream_state()
         if self._agent_mode:
             try:
                 requests.post(
@@ -1470,6 +1509,8 @@ class StarCoderGUI:
         self._open_folder = os.path.abspath(folder)
         self.folder_path_lbl.config(text=self._open_folder)
         self._context_injected = False   # P2-1: 새 폴더 열면 컨텍스트 플래그 리셋
+        self._server_fail_count = 0
+        self._agent_fail_count = 0
         self._refresh_folder_view(select_path=self._open_folder)
         self._save_layout()
 
@@ -1857,7 +1898,6 @@ class StarCoderGUI:
                 data = r.json()
                 model = data.get("model", "unknown")
 
-                # 에이전트 가용 여부 확인
                 agent_ok = False
                 try:
                     ra = requests.get(f"{API_URL}/agent/sessions", timeout=3)
@@ -1873,14 +1913,19 @@ class StarCoderGUI:
         threading.Thread(target=check, daemon=True).start()
 
     def _set_online(self, online, model, agent_ok=False):
-        self._agent_available = agent_ok
         if online:
+            self._server_fail_count = 0
+            self._agent_fail_count = 0 if agent_ok else self._agent_fail_count + 1
+            self._agent_available = agent_ok
             self.dot.config(fg=GREEN)
-            agent_tag = " + Agent" if agent_ok else ""
-            self.status_lbl.config(fg=MUTED, text=f"온라인  │  {model}{agent_tag}")
+            agent_tag = " + Agent" if self._agent_available else ""
+            self.status_lbl.config(fg=MUTED, text=f"?⑤씪?? ?? {model}{agent_tag}")
         else:
+            self._server_fail_count += 1
+            if self._server_fail_count < 3:
+                return
             self.dot.config(fg=RED)
-            self.status_lbl.config(fg=RED, text="서버 오프라인 — localhost:8888")
+            self.status_lbl.config(fg=RED, text="?쒕쾭 ?ㅽ봽?쇱씤 ??localhost:8888")
             self._agent_available = False
 
 

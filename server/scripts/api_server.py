@@ -819,18 +819,27 @@ document.addEventListener('keydown', e => {
 
 async function refresh() {
   try {
-    const r = await fetch('/stats');
-    if (!r.ok) throw new Error();
+    const r = await fetch('/health');
+    if (!r.ok) throw new Error('health failed');
     const d = await r.json();
-
     document.getElementById('dot').className = 'dot';
     document.getElementById('status-text').textContent = 'Online';
     document.getElementById('model-name').textContent = d.model || '-';
     document.getElementById('uptime').textContent = fmtUptime(d.uptime_sec);
+  } catch (e) {
+    document.getElementById('dot').className = 'dot offline';
+    document.getElementById('status-text').textContent = 'Offline';
+    return;
+  }
+
+  try {
+    const stats = await fetch('/stats');
+    if (!stats.ok) throw new Error('stats failed');
+    const d = await stats.json();
     document.getElementById('total-req').textContent = fmtNumber(d.total_requests);
     document.getElementById('total-gen').textContent = fmtNumber(d.total_generated_tokens);
     document.getElementById('total-prompt').textContent = fmtNumber(d.total_prompt_tokens);
-  document.getElementById('avg-ms').textContent = d.total_requests > 0 ? fmtDurationMs(d.avg_response_ms) : '-';
+    document.getElementById('avg-ms').textContent = d.total_requests > 0 ? fmtDurationMs(d.avg_response_ms) : '-';
 
     recentData = d.recent || [];
     const tbody = document.getElementById('req-tbody');
@@ -868,8 +877,7 @@ async function refresh() {
 
     document.getElementById('last-update').textContent = 'Last update: ' + new Date().toLocaleTimeString();
   } catch (e) {
-    document.getElementById('dot').className = 'dot offline';
-    document.getElementById('status-text').textContent = 'Offline';
+    document.getElementById('last-update').textContent = 'Stats unavailable';
   }
 }
 
