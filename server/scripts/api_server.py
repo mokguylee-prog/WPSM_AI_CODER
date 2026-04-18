@@ -169,6 +169,7 @@ _req_counter = itertools.count(1)
 # ---------------------------------------------------------------------------
 _llm_lock: threading.Lock = threading.Lock()
 _active_cancel: Optional[threading.Event] = None
+_active_entry: Optional[dict] = None   # 현재 처리 중인 요청 엔트리
 _active_last_tick: float = 0.0
 _WATCHDOG_INTERVAL: float = 5.0
 _IDLE_CANCEL_S: float = 10.0
@@ -225,6 +226,8 @@ def begin_request(prompt: str, kind: str = "chat") -> dict:
 
 
 def finish_request(entry: dict, prompt_tokens: int, gen_tokens: int, elapsed_ms: float, response: str):
+    if entry.get("status") == "cancelled":
+        return  # 취소된 요청은 덮어쓰지 않음
     prompt_tokens = int(prompt_tokens or 0)
     gen_tokens = int(gen_tokens or 0)
     entry["prompt_tokens"] = prompt_tokens
@@ -242,8 +245,18 @@ def finish_request(entry: dict, prompt_tokens: int, gen_tokens: int, elapsed_ms:
 
 
 def fail_request(entry: dict, err: str):
+    if entry.get("status") == "cancelled":
+        return  # 취소된 요청은 덮어쓰지 않음
     entry["status"] = "error"
     entry["response"] = f"[error] {err}"
+    entry["elapsed_ms"] = round((time.time() - entry.get("_t0", time.time())) * 1000)
+    write_log(entry)
+
+
+def cancel_request(entry: dict):
+    """요청을 취소 상태로 마킹한다."""
+    entry["status"] = "cancelled"
+    entry["response"] = "[cancelled by client]"
     entry["elapsed_ms"] = round((time.time() - entry.get("_t0", time.time())) * 1000)
     write_log(entry)
 
@@ -412,15 +425,17 @@ def load_model():
 
 @app.post("/generate", response_model=GenerateResponse)
 def generate(req: GenerateRequest):
-    global _active_cancel, _active_last_tick
+    global _active_cancel, _active_entry, _active_last_tick
     if llm is None:
         raise HTTPException(503, "Model is loading")
     if not _llm_lock.acquire(blocking=True, timeout=_LOCK_WAIT_S):
         raise HTTPException(503, "Server busy: previous session did not finish in time.")
     _active_last_tick = time.time()
+    _active_cancel = None
 
     messages = [{"role": "system", "content": req.system}, {"role": "user", "content": req.prompt}]
     entry = begin_request(req.prompt, kind="generate")
+    _active_entry = entry
 
     try:
         max_tokens = _clamp_max_tokens(messages, req.max_tokens)
@@ -454,12 +469,13 @@ def generate(req: GenerateRequest):
 
 @app.post("/chat")
 def chat(req: ChatRequest):
-    global _active_cancel, _active_last_tick
+    global _active_cancel, _active_entry, _active_last_tick
     if llm is None:
         raise HTTPException(503, "Model is loading")
     if not _llm_lock.acquire(blocking=True, timeout=_LOCK_WAIT_S):
         raise HTTPException(503, "Server busy: previous session did not finish in time.")
     _active_last_tick = time.time()
+    _active_cancel = None
 
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
     if not messages or messages[0]["role"] != "system":
@@ -467,6 +483,7 @@ def chat(req: ChatRequest):
 
     user_msgs = [m.content for m in req.messages if m.role == "user"]
     entry = begin_request(user_msgs[-1] if user_msgs else "", kind="chat")
+    _active_entry = entry
 
     try:
         max_tokens = _clamp_max_tokens(messages, req.max_tokens)
@@ -525,7 +542,7 @@ def chat_stream(req: ChatStreamRequest):
     클라이언트 강제 종료 시: gen()에서 GeneratorExit → _stream_cancel 세트 →
     worker가 토큰 루프를 중단 → _llm_lock 해제 → 새 요청 즉시 수락 가능.
     """
-    global _active_cancel, _active_last_tick
+    global _active_cancel, _active_entry, _active_last_tick
     if llm is None:
         raise HTTPException(503, "Model is loading")
     if not _llm_lock.acquire(blocking=True, timeout=_LOCK_WAIT_S):
@@ -544,6 +561,7 @@ def chat_stream(req: ChatStreamRequest):
 
     cancel_event = threading.Event()
     _active_cancel = cancel_event
+    _active_entry = entry
     _active_last_tick = time.time()
 
     def worker():
@@ -621,22 +639,31 @@ def chat_stream(req: ChatStreamRequest):
 
 @app.post("/cancel")
 def cancel_inference():
-    """클라이언트가 명시적으로 취소를 요청할 때 호출.
-    진행 중인 추론을 즉시 중단하고 pending 엔트리를 cancelled 로 마킹한다.
+    """클라이언트 취소 요청.
+    1. _active_cancel 이벤트 세트 → streaming worker 토큰 루프 즉시 중단
+    2. _active_entry 를 cancelled 로 마킹 → finish_request 가 덮어쓰지 못하게 차단
+    3. 나머지 pending 엔트리도 정리
     """
-    global _active_cancel
+    global _active_cancel, _active_entry
     cancelled = False
+
+    # streaming 취소 신호
     if _active_cancel is not None and not _active_cancel.is_set():
         _active_cancel.set()
         cancelled = True
-        print("[cancel] Client requested cancel — cancel_event set")
+        print("[cancel] cancel_event set")
 
-    # pending 상태인 엔트리를 모두 cancelled 로 전환
+    # 현재 활성 엔트리 즉시 마킹 (blocking /chat 포함)
+    if _active_entry is not None and _active_entry.get("status") == "pending":
+        cancel_request(_active_entry)
+        cancelled = True
+        print(f"[cancel] active entry #{_active_entry.get('id')} marked cancelled")
+
+    # 혹시 남은 pending 엔트리 정리
     for entry in recent_requests:
         if entry.get("status") == "pending":
-            entry["status"] = "cancelled"
-            entry["response"] = "[cancelled by client]"
-            entry["elapsed_ms"] = round((time.time() - entry.get("_t0", time.time())) * 1000)
+            cancel_request(entry)
+            cancelled = True
 
     return {"cancelled": cancelled}
 
