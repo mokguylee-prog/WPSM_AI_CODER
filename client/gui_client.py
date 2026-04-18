@@ -861,8 +861,6 @@ class StarCoderGUI:
             if saved:
                 self._select_tree_path(os.path.dirname(saved[0]))
             self._context_injected = False
-            self._server_fail_count = 0
-            self._agent_fail_count = 0
             self.result_box.config(state=tk.NORMAL)
             self.result_box.insert(tk.END, "\n\n[Saved files]\n", "agent_ok")
             for path in saved:
@@ -1160,7 +1158,9 @@ class StarCoderGUI:
             except Exception:
                 pass
 
-    def _cleanup_stream_state(self):
+    def _cleanup_stream_state(self, epoch: int | None = None):
+        if epoch is not None and not self._is_epoch_current(epoch):
+            return
         self._cancel_buffer_flush()
         self._chat_text_buffer.clear()
         self._agent_step_buffer.clear()
@@ -1604,8 +1604,6 @@ class StarCoderGUI:
         self._open_folder = os.path.abspath(folder)
         self.folder_path_lbl.config(text=self._open_folder)
         self._context_injected = False   # P2-1: 새 폴더 열면 컨텍스트 플래그 리셋
-        self._server_fail_count = 0
-        self._agent_fail_count = 0
         self._refresh_folder_view(select_path=self._open_folder)
         self._save_layout()
 
@@ -1977,18 +1975,25 @@ class StarCoderGUI:
     # ──────────────────────────────────────────
     # Server health check (5초마다)
     # ──────────────────────────────────────────
+    def _schedule_next_health_check(self):
+        """메인 스레드에서만 호출. 5초 후 다음 health check를 예약한다."""
+        self.root.after(5000, self._check_server)
+
     def _check_server(self):
         def check():
             epoch = self._current_reconnect_epoch()
             try:
                 r = requests.get(f"{API_URL}/health", timeout=3)
-                data = r.json()
-                model = data.get("model", "unknown")
-
-                self.root.after(0, lambda e=epoch, m=model: self._set_online(True, m, epoch=e))
+                if r.ok:
+                    data = r.json()
+                    model = data.get("model", "")
+                    ok = data.get("status") == "ok"
+                    self.root.after(0, lambda e=epoch, m=model, s=ok: self._set_online(s, m, epoch=e))
+                else:
+                    self.root.after(0, lambda e=epoch: self._set_online(False, "", epoch=e))
             except Exception:
                 self.root.after(0, lambda e=epoch: self._set_online(False, "", epoch=e))
-            self.root.after(5000, self._check_server)
+            self.root.after(0, self._schedule_next_health_check)
 
         threading.Thread(target=check, daemon=True).start()
 
@@ -2005,7 +2010,10 @@ class StarCoderGUI:
             self._agent_fail_count = 0
             self._agent_available = True
             self.dot.config(fg=GREEN)
-            self.status_lbl.config(fg=MUTED, text=f"Server Online - {model}")
+            if model:
+                self.status_lbl.config(fg=MUTED, text=f"Server Online - {model}")
+            else:
+                self.status_lbl.config(fg=MUTED, text="Server Ready - loading model...")
         else:
             self._server_fail_count += 1
             if self._server_fail_count < 3:
