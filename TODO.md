@@ -40,3 +40,11 @@
   - [x] Sm_AICoder_dialog/DiagStarCoder_20260418000000.md
 - [x] ì—ì´ì „íŠ¸ íŒŒì¼ ë°˜ì˜ ê°•ì œ í™•ì¸
   - [x] Sm_AICoder_dialog/DiagStarCoder_20260418010000.md
+
+- [x] ?¤í¬ë¡?ì±„íŒ…/ì°¨ì†Œ/ì§„í–‰ ?œí˜„
+  - [x] Sm_AICoder_dialog/DiagStarCoder_20260418020000.md
+
+- [ ] Python/Node/Java/C++ ÇÁ·¹ÀÓ¿öÅ©º° ½ºÄ³Æúµå È®Àå
+- [ ] »ı¼ºµÈ ÇÁ·ÎÁ§Æ® ÀÚµ¿ .sln/.csproj/ÆĞÅ°Áö ÆÄÀÏ º¸°­
+- [ ] GUI Æ®¸® ÀÚµ¿ È®Àå/¼±ÅÃ µ¿ÀÛ Ãß°¡ °ËÁõ
+  - [x] Sm_AICoder_dialog/DiagStarCoder_20260418030000.md

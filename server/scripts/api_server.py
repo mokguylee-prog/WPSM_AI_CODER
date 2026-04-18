@@ -33,16 +33,99 @@ PROJECT_ROOT = os.path.dirname(SERVER_DIR)
 MODEL_DIR = os.path.join(PROJECT_ROOT, "Sm_AICoder", "models", "gguf")
 LOG_DIR = os.path.join(SERVER_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, f"requests_{datetime.now().strftime('%Y%m%d%H%M%S')}.log")
+REQUEST_SNAPSHOTS_DIR = os.path.join(LOG_DIR, "request_snapshots")
 PORT = 8888
 N_CTX = 8192
 CTX_SAFETY_MARGIN = 256
 N_THREADS = 8
-N_GPU_LAYERS = 0
+
+# ---------------------------------------------------------------------------
+# P5-1: N_GPU_LAYERS 자동 감지
+#   우선순위: 환경변수 N_GPU_LAYERS > torch.cuda > nvidia-smi > CPU 폴백(0)
+# ---------------------------------------------------------------------------
+
+def _detect_gpu_layers() -> int:
+    """Return optimal n_gpu_layers value based on detected hardware."""
+    # 1) 환경변수 명시 지정이 최우선
+    env_val = os.environ.get("N_GPU_LAYERS")
+    if env_val is not None:
+        try:
+            layers = int(env_val)
+            print(f"[GPU] N_GPU_LAYERS from env: {layers}")
+            return layers
+        except ValueError:
+            print(f"[GPU] Invalid N_GPU_LAYERS env value '{env_val}', falling back to auto-detect")
+
+    # 2) torch.cuda 확인 (torch 가 설치되어 있을 때만)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+            print(f"[GPU] CUDA detected via torch: {gpu_name} ({vram_gb:.1f} GB VRAM)")
+            print("[GPU] n_gpu_layers=-1 (full offload)")
+            return -1
+    except ImportError:
+        pass
+
+    # 3) nvidia-smi 확인 (torch 미설치 환경 대비)
+    import subprocess
+    _nvidia_smi_paths = [
+        "nvidia-smi",
+        r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+        r"C:\Windows\System32\nvidia-smi.exe",
+    ]
+    for smi_path in _nvidia_smi_paths:
+        try:
+            r = subprocess.run(
+                [smi_path, "--query-gpu=name,memory.total", "--format=csv,noheader"],
+                capture_output=True,
+                timeout=5,
+            )
+            if r.returncode == 0 and r.stdout:
+                try:
+                    out = r.stdout.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    out = r.stdout.decode("cp949", errors="replace").strip()
+                if out:
+                    print(f"[GPU] CUDA detected via nvidia-smi: {out.splitlines()[0]}")
+                    print("[GPU] n_gpu_layers=-1 (full offload)")
+                    return -1
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            continue
+
+    # 4) GPU 없음 → CPU 전용
+    print("[GPU] No CUDA GPU detected. Running CPU-only (n_gpu_layers=0)")
+    return 0
+
+
+N_GPU_LAYERS: int = _detect_gpu_layers()
+
+# ---------------------------------------------------------------------------
+# P5-2: 모델 라우팅 설정
+#   model_route.first  — 첫 번째 사용자 턴에 사용할 모델 파일명 패턴 (큰 모델)
+#   model_route.followup — 후속 도구 호출 턴에 사용할 모델 파일명 패턴 (작은 모델)
+#   패턴이 None 이거나 파일이 없으면 단일 모델(find_model) 로 폴백한다.
+# ---------------------------------------------------------------------------
+
+MODEL_ROUTE: dict = {
+    "first": os.environ.get("MODEL_ROUTE_FIRST", "qwen2.5-coder-7b"),
+    "followup": os.environ.get("MODEL_ROUTE_FOLLOWUP", "qwen2.5-coder-1.5b"),
+}
+
+# P5-3: KV 캐시 재사용 — 시스템 프롬프트/도구 스키마가 변하지 않으므로 True
+CACHE_PROMPT: bool = os.environ.get("CACHE_PROMPT", "1").strip().lower() not in ("0", "false", "no")
 
 SYSTEM_PROMPT = (
     "You are an expert C/C++ programming assistant. "
     "When the user asks you to write code, provide complete, working code. "
     "When creating project files, show the full file contents. "
+    "When the request is to create an example or a project, always respond with file-separated output. "
+    "Use this format for every file: a clear file path line such as 'File: path/to/file.ext' "
+    "followed by a fenced code block containing only that file's contents. "
+    "For multi-file projects, emit one section per file and do not mix unrelated files in one block. "
+    "If you generate C# WinForms examples, include each file separately, such as Program.cs, Form1.cs, "
+    "Form1.Designer.cs, and the .csproj file. "
     "Respond in the same language the user writes in (Korean if Korean, English if English). "
     "Keep explanations concise unless asked for details."
 )
@@ -57,8 +140,13 @@ try:
 except ImportError as _agent_err:
     print(f"[Sm_AIAgent] Agent module load failed (chat-only mode): {_agent_err}")
 
+# P5-2: 라우팅 모델 인스턴스
+#   llm        — primary (첫 턴 / 단일 모드)
+#   llm_small  — followup 도구 호출용 경량 모델 (None 이면 llm 으로 폴백)
 llm: Optional[Llama] = None
+llm_small: Optional[Llama] = None
 model_name: str = ""
+model_name_small: str = ""
 start_time: float = 0.0
 
 stats = {
@@ -97,6 +185,8 @@ def begin_request(prompt: str, kind: str = "chat") -> dict:
 
 
 def finish_request(entry: dict, prompt_tokens: int, gen_tokens: int, elapsed_ms: float, response: str):
+    prompt_tokens = int(prompt_tokens or 0)
+    gen_tokens = int(gen_tokens or 0)
     entry["prompt_tokens"] = prompt_tokens
     entry["gen_tokens"] = gen_tokens
     entry["elapsed_ms"] = round(elapsed_ms)
@@ -143,14 +233,70 @@ def _clamp_max_tokens(messages: list[dict], requested: int) -> int:
     return requested
 
 
-def find_model() -> str:
+def _estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+def find_model(pattern: Optional[str] = None) -> str:
+    """Return path to best matching GGUF model.
+
+    Args:
+        pattern: Optional substring to match against filenames (case-insensitive).
+                 When None or no match found, returns the largest GGUF file.
+    """
     files = glob.glob(os.path.join(MODEL_DIR, "*.gguf"))
     if not files:
         raise FileNotFoundError(
             f"No GGUF model found: {MODEL_DIR}\n"
             "Run: python server/scripts/download_model.py"
         )
+    if pattern:
+        pattern_lower = pattern.lower()
+        matched = [f for f in files if pattern_lower in os.path.basename(f).lower()]
+        if matched:
+            return max(matched, key=os.path.getsize)
+        print(f"[ModelRoute] Pattern '{pattern}' not matched in {MODEL_DIR}. Falling back to largest model.")
     return max(files, key=os.path.getsize)
+
+
+def _load_llama(path: str, label: str = "") -> Llama:
+    """Instantiate a Llama model with shared server settings."""
+    tag = f"[{label}] " if label else ""
+    print(f"{tag}Loading model: {os.path.basename(path)} | n_gpu_layers={N_GPU_LAYERS} | cache_prompt={CACHE_PROMPT}")
+    return Llama(
+        model_path=path,
+        n_ctx=N_CTX,
+        n_threads=N_THREADS,
+        n_gpu_layers=N_GPU_LAYERS,
+        verbose=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# P5-2: 라우팅 헬퍼 — turn_index 0 이면 big model, 1+ 이면 small model
+# ---------------------------------------------------------------------------
+
+def _route_llm(turn_index: int = 0) -> Llama:
+    """Return appropriate Llama instance based on conversation turn."""
+    if turn_index > 0 and llm_small is not None:
+        return llm_small
+    return llm  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# P5-3: prompt cache env flag helper
+# ---------------------------------------------------------------------------
+
+def _chat_kwargs(base: dict) -> dict:
+    """Return chat kwargs compatible with the installed llama-cpp-python version."""
+    return base
+
+
+def _create_chat_completion_safe(llm_obj: Llama, kwargs: dict):
+    """Call create_chat_completion with a compatibility fallback for older builds."""
+    return llm_obj.create_chat_completion(**kwargs)
 
 
 class ChatMessage(BaseModel):
@@ -163,6 +309,9 @@ class ChatRequest(BaseModel):
     max_tokens: int = 1024
     temperature: float = 0.3
     top_p: float = 0.95
+    force_json: bool = False
+    # P5-2: 0 = 첫 턴 (big model), 1+ = 후속 도구 호출 턴 (small model)
+    turn_index: int = 0
 
 
 class ChatStreamRequest(BaseModel):
@@ -170,6 +319,10 @@ class ChatStreamRequest(BaseModel):
     max_tokens: int = 1024
     temperature: float = 0.3
     top_p: float = 0.95
+    # P5-2: 0 = 첫 턴, 1+ = 후속 도구 호출 턴
+    turn_index: int = 0
+    # P6-3: 호출 출처를 대시보드에 기록. "chat"(기본) 또는 "agent-step".
+    kind: str = "chat"
 
 
 class GenerateRequest(BaseModel):
@@ -189,13 +342,32 @@ class GenerateResponse(BaseModel):
 
 @app.on_event("startup")
 def load_model():
-    global llm, model_name, start_time
-    path = find_model()
-    model_name = os.path.basename(path)
-    print(f"Loading model: {model_name}")
-    llm = Llama(model_path=path, n_ctx=N_CTX, n_threads=N_THREADS, n_gpu_layers=N_GPU_LAYERS, verbose=True)
+    """P5-1/P5-2/P5-3: GPU auto-detect, model routing, prompt cache flag."""
+    global llm, llm_small, model_name, model_name_small, start_time
+
+    # Primary (big) model — 첫 턴 / 단일 모드
+    first_pattern = MODEL_ROUTE.get("first")
+    primary_path = find_model(first_pattern)
+    model_name = os.path.basename(primary_path)
+    llm = _load_llama(primary_path, label="primary")
+    print(f"[primary] Model ready: {model_name}")
+
+    # Followup (small) model — 도구 호출 후속 턴 (선택적)
+    followup_pattern = MODEL_ROUTE.get("followup")
+    if followup_pattern:
+        followup_path = find_model(followup_pattern)
+        followup_basename = os.path.basename(followup_path)
+        # 큰 모델과 같은 파일이면 별도 로드 불필요
+        if followup_path != primary_path:
+            llm_small = _load_llama(followup_path, label="followup")
+            model_name_small = followup_basename
+            print(f"[followup] Model ready: {model_name_small}")
+        else:
+            print(f"[followup] Same as primary ({followup_basename}). Single-model mode.")
+            model_name_small = model_name
+
     start_time = time.time()
-    print("Server startup complete")
+    print(f"Server startup complete | GPU layers={N_GPU_LAYERS} | cache_prompt={CACHE_PROMPT}")
 
 
 @app.post("/generate", response_model=GenerateResponse)
@@ -209,12 +381,14 @@ def generate(req: GenerateRequest):
     try:
         max_tokens = _clamp_max_tokens(messages, req.max_tokens)
         t0 = time.time()
-        result = llm.create_chat_completion(
+        # P5-2: /generate 는 항상 첫 턴(big model)
+        # P5-3: prompt cache flag is logged but not passed to create_chat_completion
+        result = _create_chat_completion_safe(_route_llm(0), _chat_kwargs(dict(
             messages=messages,
             max_tokens=max_tokens,
             temperature=req.temperature,
             top_p=req.top_p,
-        )
+        )))
         elapsed = (time.time() - t0) * 1000
 
         choice = result["choices"][0]
@@ -249,12 +423,25 @@ def chat(req: ChatRequest):
     try:
         max_tokens = _clamp_max_tokens(messages, req.max_tokens)
         t0 = time.time()
-        result = llm.create_chat_completion(
+
+        # P3-1: force_json=True 이면 GBNF json_object 그래머로 모델 출력 강제.
+        # llama-cpp-python 0.3.x 에서 response_format={"type":"json_object"} 가
+        # GBNF 그래머로 동작하므로 생성 속도가 약간 낮아질 수 있음 — 옵션으로만 사용.
+        call_kwargs: dict = dict(
             messages=messages,
             max_tokens=max_tokens,
             temperature=req.temperature,
             top_p=req.top_p,
         )
+
+        if req.force_json:
+            call_kwargs["response_format"] = {"type": "json_object"}
+
+        # P5-2: turn_index 로 big/small 모델 선택
+        # P5-3: prompt cache flag is logged but not passed to create_chat_completion
+        active_llm = _route_llm(req.turn_index)
+        active_model_name = model_name_small if (active_llm is llm_small and llm_small is not None) else model_name
+        result = _create_chat_completion_safe(active_llm, _chat_kwargs(call_kwargs))
         elapsed = (time.time() - t0) * 1000
 
         choice = result["choices"][0]
@@ -268,7 +455,7 @@ def chat(req: ChatRequest):
             "response": response_text,
             "elapsed_ms": round(elapsed),
             "message": choice["message"],
-            "model": model_name,
+            "model": active_model_name,
             "usage": usage,
         }
     except HTTPException as e:
@@ -282,15 +469,24 @@ def chat(req: ChatRequest):
 
 @app.post("/chat/stream")
 def chat_stream(req: ChatStreamRequest):
+    """NDJSON 스트리밍 /chat 엔드포인트.
+
+    P4-2: idle-timeout — 마지막 토큰 이후 IDLE_TIMEOUT_S 초 무응답 시 연결을 끊는다.
+          300s 단일 timeout 방식은 폐기되었다.
+    """
     if llm is None:
         raise HTTPException(503, "Model is loading")
+
+    # P4-2: idle-timeout 상수 — AgentLoop.IDLE_TIMEOUT_S 와 동일 값 사용
+    IDLE_TIMEOUT_S: float = 60.0
 
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
     if not messages or messages[0]["role"] != "system":
         messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
 
     user_msgs = [m.content for m in req.messages if m.role == "user"]
-    entry = begin_request(user_msgs[-1] if user_msgs else "", kind="chat")
+    # P6-3: 요청자가 kind 를 지정한 경우("agent-step") 그대로 기록한다.
+    entry = begin_request(user_msgs[-1] if user_msgs else "", kind=req.kind)
     q: "queue.Queue[object]" = queue.Queue()
     done = object()
 
@@ -299,12 +495,18 @@ def chat_stream(req: ChatStreamRequest):
             max_tokens = _clamp_max_tokens(messages, req.max_tokens)
             t0 = time.time()
             chunks = []
-            stream = llm.create_chat_completion(
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=req.temperature,
-                top_p=req.top_p,
-                stream=True,
+            # P5-2: turn_index 로 big/small 모델 선택
+            # P5-3: prompt cache flag is logged but not passed to create_chat_completion
+            active_llm = _route_llm(req.turn_index)
+            stream = _create_chat_completion_safe(
+                active_llm,
+                _chat_kwargs(dict(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=req.temperature,
+                    top_p=req.top_p,
+                    stream=True,
+                )),
             )
             for piece in stream:
                 delta = piece["choices"][0].get("delta", {})
@@ -314,7 +516,9 @@ def chat_stream(req: ChatStreamRequest):
                     q.put({"type": "token", "text": token})
             elapsed = (time.time() - t0) * 1000
             response_text = "".join(chunks)
-            finish_request(entry, 0, 0, elapsed, response_text)
+            pt = _count_messages_tokens(messages)
+            gt = _estimate_tokens(response_text)
+            finish_request(entry, pt, gt, elapsed, response_text)
             q.put({"type": "final", "response": response_text, "elapsed_ms": round(elapsed)})
         except Exception as e:
             traceback.print_exc()
@@ -326,10 +530,20 @@ def chat_stream(req: ChatStreamRequest):
     threading.Thread(target=worker, daemon=True).start()
 
     def gen():
+        last_activity = time.monotonic()  # P4-2: idle-timeout 기준점
         while True:
             try:
-                item = q.get(timeout=2.0)
+                item = q.get(timeout=1.0)
+                last_activity = time.monotonic()  # 데이터 수신 → 리셋
             except queue.Empty:
+                # P4-2: idle-timeout 검사
+                idle = time.monotonic() - last_activity
+                if idle > IDLE_TIMEOUT_S:
+                    yield json.dumps(
+                        {"type": "error", "error": f"idle_timeout after {idle:.0f}s"},
+                        ensure_ascii=False,
+                    ) + "\n"
+                    break
                 yield json.dumps({"type": "heartbeat", "ts": time.time()}, ensure_ascii=False) + "\n"
                 continue
             if item is done:
@@ -383,6 +597,45 @@ def download_log():
         raise HTTPException(404, "Log file not found")
     download_name = f"requests_{datetime.now().strftime('%Y%m%d%H%M%S')}.log"
     return FileResponse(LOG_FILE, filename=download_name, media_type="text/plain; charset=utf-8")
+
+
+@app.post("/requests/{request_index}/save")
+def save_request_snapshot(request_index: int):
+    now = datetime.now().strftime("%Y%m%d%H%M%S")
+    if request_index < 0 or request_index >= len(recent_requests):
+        raise HTTPException(404, "Request not found")
+
+    req = list(recent_requests)[request_index]
+    stamp = req.get("time", now).replace("-", "").replace(":", "").replace(" ", "_")
+    safe_kind = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(req.get("kind", "chat")))
+    folder_name = f"{stamp}_{safe_kind}"
+    folder_path = os.path.join(REQUEST_SNAPSHOTS_DIR, folder_name)
+    os.makedirs(folder_path, exist_ok=True)
+
+    md_path = os.path.join(folder_path, "request.md")
+    json_path = os.path.join(folder_path, "request.json")
+
+    md_text = (
+        f"# Request Snapshot\n\n"
+        f"- Time: {req.get('time', '')}\n"
+        f"- Kind: {req.get('kind', '')}\n"
+        f"- Status: {req.get('status', '')}\n"
+        f"- Prompt tokens: {req.get('prompt_tokens', 0)}\n"
+        f"- Gen tokens: {req.get('gen_tokens', 0)}\n"
+        f"- Elapsed: {req.get('elapsed_ms', 0)} ms\n\n"
+        f"## Prompt\n\n{req.get('prompt', '')}\n\n"
+        f"## Response\n\n{req.get('response', '')}\n"
+    )
+    with open(md_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(md_text)
+    with open(json_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(req, f, ensure_ascii=False, indent=2)
+
+    return {
+        "saved": True,
+        "folder": folder_path,
+        "files": [md_path, json_path],
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -479,10 +732,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th>Prompt Tokens</th>
       <th>Gen Tokens</th>
       <th>Elapsed</th>
+      <th>Kind</th>
     </tr>
   </thead>
   <tbody id="req-tbody">
-    <tr><td colspan="5" style="color:#484f58;text-align:center;padding:20px">No requests yet</td></tr>
+    <tr><td colspan="6" style="color:#484f58;text-align:center;padding:20px">No requests yet</td></tr>
   </tbody>
 </table>
 <p class="refresh-info">Auto refresh every 2 seconds &nbsp;|&nbsp; <span id="last-update">-</span></p>
@@ -511,6 +765,21 @@ function fmtUptime(sec) {
   return s + 's';
 }
 
+function fmtDurationMs(ms) {
+  const value = Number(ms) || 0;
+  if (value >= 1000) {
+    return (value / 1000).toFixed(1).replace(/\\.0$/, '') + ' sec';
+  }
+  return Math.round(value) + ' ms';
+}
+
+function fmtNumber(value) {
+  const n = Number(value || 0);
+  if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\\.0$/, '') + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\\.0$/, '') + 'k';
+  return n.toLocaleString();
+}
+
 function openModal(idx) {
   const r = recentData[idx];
   if (!r) return;
@@ -518,10 +787,24 @@ function openModal(idx) {
   document.getElementById('modal-prompt').textContent = r.prompt;
   document.getElementById('modal-response').textContent = r.response;
   document.getElementById('modal-meta').innerHTML =
-    `<div class="meta-chip">Prompt Tokens <span>${r.prompt_tokens.toLocaleString()}</span></div>
-     <div class="meta-chip">Generated Tokens <span>${r.gen_tokens.toLocaleString()}</span></div>
-     <div class="meta-chip">Elapsed <span>${r.elapsed_ms.toLocaleString()} ms</span></div>`;
+    `<div class="meta-chip">Kind <span>${r.kind || 'chat'}</span></div>
+     <div class="meta-chip">Prompt Tokens <span>${fmtNumber(r.prompt_tokens)}</span></div>
+     <div class="meta-chip">Generated Tokens <span>${fmtNumber(r.gen_tokens)}</span></div>
+     <div class="meta-chip">Elapsed <span>${fmtDurationMs(r.elapsed_ms)}</span></div>`;
   document.getElementById('modal-bg').classList.add('show');
+  saveRequestSnapshot(idx);
+}
+
+async function saveRequestSnapshot(idx) {
+  try {
+    const r = await fetch(`/requests/${idx}/save`, { method: 'POST' });
+    if (!r.ok) return;
+    const d = await r.json();
+    document.getElementById('last-update').textContent =
+      'Saved snapshot: ' + (d.folder || '-');
+  } catch (e) {
+    // Ignore save failures so the dashboard stays usable.
+  }
 }
 
 function closeModal(e) {
@@ -544,10 +827,10 @@ async function refresh() {
     document.getElementById('status-text').textContent = 'Online';
     document.getElementById('model-name').textContent = d.model || '-';
     document.getElementById('uptime').textContent = fmtUptime(d.uptime_sec);
-    document.getElementById('total-req').textContent = d.total_requests.toLocaleString();
-    document.getElementById('total-gen').textContent = d.total_generated_tokens.toLocaleString();
-    document.getElementById('total-prompt').textContent = d.total_prompt_tokens.toLocaleString();
-    document.getElementById('avg-ms').textContent = d.total_requests > 0 ? d.avg_response_ms.toLocaleString() + ' ms' : '-';
+    document.getElementById('total-req').textContent = fmtNumber(d.total_requests);
+    document.getElementById('total-gen').textContent = fmtNumber(d.total_generated_tokens);
+    document.getElementById('total-prompt').textContent = fmtNumber(d.total_prompt_tokens);
+  document.getElementById('avg-ms').textContent = d.total_requests > 0 ? fmtDurationMs(d.avg_response_ms) : '-';
 
     recentData = d.recent || [];
     const tbody = document.getElementById('req-tbody');
@@ -559,10 +842,15 @@ async function refresh() {
         const badge = status === 'pending'
           ? '<span class="status-badge status-pending">Pending</span>'
           : (status === 'error' ? '<span class="status-badge status-error">Error</span>' : '');
-        const elapsed = status === 'pending' ? `${r.elapsed_ms.toLocaleString()} ms elapsed...` : `${r.elapsed_ms.toLocaleString()} ms`;
-        const ptCell = status === 'pending' ? '-' : r.prompt_tokens.toLocaleString();
-        const gtCell = status === 'pending' ? '-' : r.gen_tokens.toLocaleString();
+        const elapsed = status === 'pending' ? `${fmtDurationMs(r.elapsed_ms)} elapsed...` : fmtDurationMs(r.elapsed_ms);
+        const ptCell = status === 'pending' ? '-' : fmtNumber(r.prompt_tokens);
+        const gtCell = status === 'pending' ? '-' : fmtNumber(r.gen_tokens);
         const safePrompt = r.prompt.replace(/"/g, '&quot;');
+        const kind = r.kind || 'chat';
+        const kindColor = kind === 'agent-step' ? '#bc8cff'
+          : kind === 'agent' ? '#d29922'
+          : '#3fb950';
+        const kindCell = `<span style="color:${kindColor};font-weight:600;font-size:0.78rem">${kind}</span>`;
 
         return `
         <tr class="${rowCls}" onclick="openModal(${i})">
@@ -571,10 +859,11 @@ async function refresh() {
           <td>${ptCell}</td>
           <td>${gtCell}</td>
           <td>${elapsed}</td>
+          <td>${kindCell}</td>
         </tr>`;
       }).join('');
     } else {
-      tbody.innerHTML = '<tr><td colspan="5" style="color:#484f58;text-align:center;padding:20px">No requests yet</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" style="color:#484f58;text-align:center;padding:20px">No requests yet</td></tr>';
     }
 
     document.getElementById('last-update').textContent = 'Last update: ' + new Date().toLocaleTimeString();

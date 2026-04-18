@@ -47,7 +47,7 @@ class WorkState:
 class ContextManager:
     """대화 히스토리를 관리하고, 컨텍스트 길이를 제한하며, 작업 상태를 유지"""
 
-    def __init__(self, max_turns: int = 8, max_chars: int = 6000):
+    def __init__(self, max_turns: int = 6, max_chars: int = 4000):  # P2-3: 8→6, 6000→4000
         self.messages: list[dict] = []
         self.work_state = WorkState()
         self.max_turns = max_turns
@@ -65,9 +65,9 @@ class ContextManager:
 
     def add_tool_result(self, tool_name: str, result: str):
         """도구 실행 결과를 user 메시지로 추가 (모델이 tool role을 지원하지 않을 수 있으므로)"""
-        # 결과가 너무 길면 잘라냄
-        if len(result) > 2000:
-            result = result[:2000] + "\n... (결과 생략됨)"
+        # 결과가 너무 길면 잘라냄 (P2-3: 2000→800)
+        if len(result) > 800:
+            result = result[:800] + "\n... (결과 생략됨)"
         self.messages.append({
             "role": "user",
             "content": f"[도구 결과: {tool_name}]\n{result}",

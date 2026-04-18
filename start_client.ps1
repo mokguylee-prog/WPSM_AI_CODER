@@ -8,4 +8,5 @@ $venv = Join-Path $scriptDir "venv\Scripts\python.exe"
 if (-not (Test-Path $venv)) { $venv = "python" }
 $clientScript = Join-Path $clientDir "client.py"
 
-& $venv $clientScript
+Write-Host "Sm_AICoder 클라이언트를 시작합니다..."
+& $venv -X utf8 $clientScript

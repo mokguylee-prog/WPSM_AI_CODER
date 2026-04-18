@@ -8,5 +8,9 @@
   "max_file_read_lines": 200,
   "max_search_results": 30,
   "confirm_before_write": true,
-  "confirm_before_command": false
+  "confirm_before_command": false,
+  "model_route": {
+    "first": "qwen2.5-coder-7b",
+    "followup": "qwen2.5-coder-1.5b"
+  }
 }

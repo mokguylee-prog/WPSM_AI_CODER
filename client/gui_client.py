@@ -53,6 +53,7 @@ AGENT_ANSWER_BG  = "#0d2818"
 
 # 레이아웃 설정 파일 (스크립트 옆에 저장)
 LAYOUT_FILE = os.path.join(CLIENT_DIR, "gui_layout.json")
+STATE_FILE = os.path.join(CLIENT_DIR, "app_state.json")
 
 # 기본 레이아웃: 응답창 크게(65%), 입력창 작게(35%), 상단 75% / 하단 25%
 DEFAULT_LAYOUT = {
@@ -89,6 +90,37 @@ def apply_window_icon(root: tk.Tk):
         pass
 
 
+class ToolTip:
+    def __init__(self, widget, text: str):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        widget.bind("<Enter>", self.show, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+
+    def show(self, _event=None):
+        if self.tip is not None:
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.overrideredirect(True)
+        self.tip.attributes("-topmost", True)
+        self.tip.geometry(f"+{x}+{y}")
+        label = tk.Label(self.tip, text=self.text, bg="#111827", fg="#e5e7eb",
+                         relief=tk.SOLID, bd=1, padx=8, pady=4,
+                         font=("Segoe UI", 8))
+        label.pack()
+
+    def hide(self, _event=None):
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except Exception:
+                pass
+            self.tip = None
+
+
 class StarCoderGUI:
     def __init__(self, root):
         self.root = root
@@ -101,7 +133,10 @@ class StarCoderGUI:
         self.temperature = tk.DoubleVar(value=0.2)
         self.max_tokens  = tk.IntVar(value=1024)
         self._sending    = False
+        # P4-3: in-flight 가드. 단일 세션 가정; 멀티세션 확장 시 dict[session_id, bool] 로 변경.
+        self._inflight: bool = False
         self._layout     = self._load_layout()
+        self._state      = self._load_state()
         self._open_folder = self._layout.get("open_folder", PROJECT_ROOT)
         self._attachments = []
         self._folder_rows = []
@@ -112,11 +147,16 @@ class StarCoderGUI:
         self._approval_dialog = None
         self._always_approve = bool(self._layout.get("always_approve", False))
         self._cancel_requested = False
+        self._draft_save_job = None
         self._busy_mode = ""
         self._active_stream_response = None
+        self._chat_text_buffer = []
+        self._agent_step_buffer = []
+        self._buffer_flush_job = None
+        self._context_injected = False   # P2-1: 첫 턴 1회만 컨텍스트 주입 플래그
 
         # 에이전트 모드
-        self._agent_mode = False
+        self._agent_mode = bool(self._state.get("agent_mode", False))
         self._agent_available = False
         self._agent_session_id = "gui-default"
 
@@ -125,10 +165,12 @@ class StarCoderGUI:
 
         self._build_toolbar()
         self._build_main()
+        self._restore_state()
         self._check_server()
 
         # 창 크기/위치 변경 시 저장
         self.root.bind("<Configure>", self._on_configure)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ──────────────────────────────────────────
     # 레이아웃 저장 / 불러오기
@@ -149,6 +191,25 @@ class StarCoderGUI:
             data["always_approve"] = False
             return data
 
+    def _load_state(self) -> dict:
+        try:
+            with open(STATE_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            data.setdefault("history", [])
+            data.setdefault("result_text", "")
+            data.setdefault("copy_text", "")
+            data.setdefault("draft_command", "")
+            data.setdefault("agent_mode", False)
+            return data
+        except Exception:
+            return {
+                "history": [],
+                "result_text": "",
+                "copy_text": "",
+                "draft_command": "",
+                "agent_mode": False,
+            }
+
     def _save_layout(self):
         try:
             self._layout["geometry"] = self.root.winfo_geometry()
@@ -158,6 +219,56 @@ class StarCoderGUI:
                 json.dump(self._layout, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+    def _save_state(self):
+        try:
+            if hasattr(self, "input_box"):
+                self._state["draft_command"] = self.input_box.get("1.0", tk.END).rstrip("\n")
+            if hasattr(self, "result_box"):
+                self._state["result_text"] = self.result_box.get("1.0", tk.END).rstrip("\n")
+            if hasattr(self, "copy_box"):
+                self._state["copy_text"] = self.copy_box.get("1.0", tk.END).rstrip("\n")
+            self._state["history"] = self.history
+            self._state["agent_mode"] = self._agent_mode
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._state, f, ensure_ascii=False, indent=2)
+            if hasattr(self, "folder_tree"):
+                self._refresh_folder_view(select_path=self._open_folder)
+        except Exception:
+            pass
+
+    def _restore_state(self):
+        draft = self._state.get("draft_command", "")
+        if draft and hasattr(self, "input_box"):
+            self.input_box.delete("1.0", tk.END)
+            self.input_box.insert("1.0", draft)
+        if hasattr(self, "result_box"):
+            result_text = self._state.get("result_text", "")
+            if result_text:
+                self._set_text(self.result_box, result_text)
+        if hasattr(self, "copy_box"):
+            copy_text = self._state.get("copy_text", "")
+            if copy_text:
+                self._set_text(self.copy_box, copy_text)
+        self.history = list(self._state.get("history", []))
+        self._apply_mode_ui()
+
+    def _schedule_layout_save(self):
+        if self._draft_save_job is not None:
+            try:
+                self.root.after_cancel(self._draft_save_job)
+            except Exception:
+                pass
+        self._draft_save_job = self.root.after(300, self._save_state)
+
+    def _on_input_changed(self, event=None):
+        self._schedule_layout_save()
+
+    def _on_close(self):
+        self._save_layout()
+        self._refresh_folder_view(select_path=self._open_folder)
+        self._save_state()
+        self.root.destroy()
 
     def _on_configure(self, event):
         # 루트 창 이벤트만 처리 (자식 위젯 Configure 무시)
@@ -232,38 +343,9 @@ class StarCoderGUI:
                   cursor="hand2").pack(side=tk.LEFT, padx=(0, 4))
 
         # 모드 전환 버튼 (채팅 ↔ 에이전트)
-        self.mode_btn = tk.Button(
-            bar, text="채팅 모드", command=self._toggle_mode,
-            bg="#1a1e2e", fg="#bc8cff", relief=tk.FLAT,
-            font=("Segoe UI", 9, "bold"), padx=12, pady=3,
-            cursor="hand2",
-        )
-        self.mode_btn.pack(side=tk.LEFT, padx=(8, 4))
-
-        self.mode_indicator = tk.Label(
-            bar, text="", fg=MUTED, bg=PANEL_BG,
-            font=("Segoe UI", 8),
-        )
-        self.mode_indicator.pack(side=tk.LEFT, padx=(0, 4))
-
-        self.approve_btn = tk.Button(
-            bar, text="허용", command=self._approve_pending_command,
-            bg="#1f4d2e", fg=GREEN, relief=tk.FLAT,
-            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
-            state=tk.DISABLED,
-        )
-        self.approve_btn.pack(side=tk.LEFT, padx=(8, 4))
-
-        self.cancel_btn = tk.Button(
-            bar, text="취소", command=self._cancel_current_job,
-            bg="#4d1f1f", fg=RED, relief=tk.FLAT,
-            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
-            state=tk.DISABLED,
-        )
-        self.cancel_btn.pack(side=tk.LEFT, padx=(4, 4))
-
         self.status_bar = tk.Label(
-            bar, text="대기 중", fg=MUTED, bg=PANEL_BG, font=("Segoe UI", 9, "bold")
+            bar, text="대기 중", fg=TEXT, bg="#1f2937", font=("Segoe UI", 10, "bold"),
+            padx=10, pady=3
         )
         self.status_bar.pack(side=tk.LEFT, padx=(12, 0))
 
@@ -345,6 +427,12 @@ class StarCoderGUI:
             font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
         ).pack(side=tk.LEFT)
 
+        tk.Button(
+            btn_row, text="Delete", command=self._delete_selected_item,
+            bg="#4d1f1f", fg=RED, relief=tk.FLAT,
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+        ).pack(side=tk.RIGHT)
+
         self.folder_path_lbl = tk.Label(
             frame, text=self._open_folder, fg=MUTED, bg=PANEL_BG,
             font=("Segoe UI", 8), wraplength=220, justify=tk.LEFT,
@@ -370,7 +458,7 @@ class StarCoderGUI:
         self.preview_text_lbl = tk.Label(preview, text="No selection", fg=MUTED, bg=PANEL_BG,
                                          wraplength=220, justify=tk.LEFT, font=("Segoe UI", 8))
         self.preview_text_lbl.pack(anchor=tk.W)
-        self._refresh_folder_view()
+        self._refresh_folder_view(select_path=self._open_folder)
 
     def _build_editor_panel(self, parent):
         frame = tk.Frame(parent, bg=PANEL_BG)
@@ -400,6 +488,7 @@ class StarCoderGUI:
         )
         self.editor_box.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
         self.editor_box.bind("<Control-s>", self._save_selected_file)
+        self.root.bind("<Delete>", self._delete_selected_item)
 
         self._selected_file_path = ""
 
@@ -407,27 +496,73 @@ class StarCoderGUI:
         frame = tk.Frame(parent, bg=PANEL_BG)
         parent.add(frame, minsize=180)
 
-        self._section_label(frame, "Command Input")
+        self._section_label(frame, "명령 입력")
 
         btn_row = tk.Frame(frame, bg=PANEL_BG, pady=6, padx=8)
         btn_row.pack(side=tk.BOTTOM, fill=tk.X)
 
+        left_actions = tk.Frame(btn_row, bg=PANEL_BG)
+        left_actions.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        center_actions = tk.Frame(btn_row, bg=PANEL_BG)
+        center_actions.pack(side=tk.LEFT)
+
+        right_actions = tk.Frame(btn_row, bg=PANEL_BG)
+        right_actions.pack(side=tk.RIGHT)
+
         self.send_btn = tk.Button(
-            btn_row, text="전송  (Ctrl+Enter)", command=self._send,
+            left_actions, text="전송  (Ctrl+Enter)", command=self._send,
             bg=BLUE, fg=DARK_BG, relief=tk.FLAT,
-            font=("Segoe UI", 10, "bold"), padx=14, pady=6,
+            font=("Segoe UI", 10, "bold"), padx=14, pady=3,
             cursor="hand2",
         )
         self.send_btn.pack(side=tk.LEFT, padx=(0, 8))
+        ToolTip(self.send_btn, "명령 전송")
 
         tk.Button(
-            btn_row, text="Clear",
-            command=lambda: self.input_box.delete("1.0", tk.END),
+            left_actions, text="지우기",
+            command=lambda: (self.input_box.delete("1.0", tk.END), self._schedule_layout_save()),
             bg=INPUT_BG, fg=MUTED, relief=tk.FLAT,
-            font=("Segoe UI", 9), padx=10, pady=6, cursor="hand2",
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
         ).pack(side=tk.LEFT)
 
-        self.turn_lbl = tk.Label(btn_row, text="대화: 0턴",
+        delete_group = tk.Frame(left_actions, bg=PANEL_BG)
+        delete_group.pack(side=tk.LEFT, padx=(2, 0))
+
+        self.cancel_btn = tk.Button(
+            delete_group, text="취소", command=self._cancel_current_job,
+            bg=INPUT_BG, fg=MUTED, relief=tk.FLAT,
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            state=tk.DISABLED,
+        )
+        self.cancel_btn.pack(side=tk.LEFT)
+        ToolTip(self.cancel_btn, "현재 요청 취소")
+
+        self.approve_btn = tk.Button(
+            center_actions, text="권한허용", command=self._approve_pending_command,
+            bg=INPUT_BG, fg=MUTED, relief=tk.FLAT,
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            state=tk.DISABLED,
+        )
+        self.approve_btn.pack(side=tk.LEFT, padx=(0, 6))
+        ToolTip(self.approve_btn, "에이전트 권한 허용")
+
+        self.mode_btn = tk.Button(
+            center_actions, text="채팅 모드", command=self._toggle_mode,
+            bg="#1a1e2e", fg="#bc8cff", relief=tk.FLAT,
+            font=("Segoe UI", 9, "bold"), padx=12, pady=3,
+            cursor="hand2",
+        )
+        self.mode_btn.pack(side=tk.LEFT)
+        ToolTip(self.mode_btn, "채팅 모드 / 에이전트 모드 전환")
+
+        self.mode_indicator = tk.Label(
+            center_actions, text="", fg=MUTED, bg=PANEL_BG,
+            font=("Segoe UI", 8),
+        )
+        self.mode_indicator.pack(side=tk.LEFT, padx=(6, 0))
+
+        self.turn_lbl = tk.Label(right_actions, text="대화: 0턴",
                                  fg=MUTED, bg=PANEL_BG,
                                  font=("Segoe UI", 9))
         self.turn_lbl.pack(side=tk.RIGHT)
@@ -438,6 +573,7 @@ class StarCoderGUI:
             padx=10, pady=10, undo=True,
         )
         self.input_box.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
+        self.input_box.bind("<KeyRelease>", self._on_input_changed)
         self.input_box.bind("<Control-Return>", lambda e: self._send())
         self.input_box.bind("<Control-v>", self._paste_from_clipboard)
         self.input_box.bind("<Control-V>", self._paste_from_clipboard)
@@ -579,6 +715,90 @@ class StarCoderGUI:
             return "\n\n".join(b.strip() for b in blocks)
         return text.strip()
 
+    def _parse_response_files(self, text: str) -> list[tuple[str, str]]:
+        files: list[tuple[str, str]] = []
+        lines = text.splitlines()
+        current_path = ""
+        current_block: list[str] = []
+        in_block = False
+        pending_file_hint = ""
+
+        def flush_block():
+            nonlocal current_path, current_block, in_block, pending_file_hint
+            if current_path and current_block:
+                content = "\n".join(current_block).rstrip("\n")
+                files.append((current_path, content))
+            current_path = ""
+            current_block = []
+            in_block = False
+            pending_file_hint = ""
+
+        for line in lines:
+            stripped = line.strip()
+            file_match = re.match(r"^(?:#{1,6}\s*)?(?:File|파일|Path|경로)\s*[:=]\s*(.+)$", stripped, re.IGNORECASE)
+            if file_match:
+                flush_block()
+                current_path = file_match.group(1).strip().strip("`")
+                continue
+
+            header_match = re.match(r"^#{1,6}\s+(.+\.(?:cs|csproj|sln|json|xml|xaml|resx|config|txt|md|ps1|py|js|ts|html|css|csproj))\s*$", stripped, re.IGNORECASE)
+            if header_match and not in_block:
+                flush_block()
+                current_path = header_match.group(1).strip()
+                continue
+
+            if stripped.startswith("```"):
+                fence_hint = stripped[3:].strip().strip("`")
+                if in_block:
+                    flush_block()
+                else:
+                    in_block = True
+                    current_block = []
+                    if fence_hint:
+                        pending_file_hint = fence_hint
+                        if not current_path:
+                            current_path = fence_hint
+                continue
+
+            if in_block:
+                current_block.append(line)
+
+        flush_block()
+
+        # Fall back to fence-hinted blocks if they were not explicitly captured as paths.
+        if not files and pending_file_hint and current_block:
+            files.append((pending_file_hint, "\n".join(current_block).rstrip("\n")))
+        return files
+
+    def _save_response_files(self, response: str):
+        base = self._open_folder or PROJECT_ROOT
+        targets = self._parse_response_files(response)
+        saved = []
+        for rel_path, content in targets:
+            rel_path = rel_path.strip().replace("/", os.sep).replace("\\", os.sep)
+            if not rel_path:
+                continue
+            abs_path = os.path.abspath(os.path.join(base, rel_path))
+            if not abs_path.startswith(os.path.abspath(base)):
+                continue
+            os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+            with open(abs_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content.rstrip("\n") + "\n")
+            saved.append(abs_path)
+
+        if saved:
+            self._refresh_folder_view()
+            if saved:
+                self._select_tree_path(os.path.dirname(saved[0]))
+            self._context_injected = False
+            self.result_box.config(state=tk.NORMAL)
+            self.result_box.insert(tk.END, "\n\n[Saved files]\n", "agent_ok")
+            for path in saved:
+                self.result_box.insert(tk.END, f"- {path}\n", "agent_step")
+            self.result_box.config(state=tk.DISABLED)
+            self.result_box.see(tk.END)
+        return saved
+
     def _append_message(self, role, content):
         """마크다운 스타일로 메시지 추가"""
         self.result_box.config(state=tk.NORMAL)
@@ -660,6 +880,11 @@ class StarCoderGUI:
     # Actions
     # ──────────────────────────────────────────
     def _send(self):
+        # P4-3: in-flight 가드 — 이미 요청이 진행 중이면 두 번째 클릭을 차단한다.
+        # 수동 검증 시나리오: Send 버튼을 연속으로 두 번 클릭하면 첫 번째만 처리되고
+        # 두 번째는 여기서 즉시 반환되어 서버에 요청이 중복 전송되지 않는다.
+        if self._inflight:
+            return
         if self._sending:
             return
         prompt = self.input_box.get("1.0", tk.END).strip()
@@ -668,8 +893,16 @@ class StarCoderGUI:
         prompt = self._build_prompt_with_context(prompt)
 
         self._sending = True
+        self._inflight = True  # P4-3: 요청 시작
         self._cancel_requested = False
-        self.send_btn.config(state=tk.DISABLED, text="생성 중...")
+        # P4-3: 버튼을 회색으로 처리해 in-flight 상태임을 시각적으로 표시
+        self.send_btn.config(
+            state=tk.DISABLED,
+            text="생성 중...",
+            bg="#4a4a4a",   # 회색 — in-flight 시각적 피드백
+            fg="#9a9a9a",
+            cursor="arrow",
+        )
         self.approve_btn.config(state=tk.DISABLED)
         self.cancel_btn.config(state=tk.NORMAL)
         self._pending_approval_command = ""
@@ -681,6 +914,10 @@ class StarCoderGUI:
         self.result_box.config(state=tk.NORMAL)
         if len(self.result_box.get("1.0", tk.END).strip()) > 0:
             self.result_box.insert(tk.END, "\n")
+
+        self._schedule_layout_save()
+
+        self._save_state()
 
         if self._agent_mode:
             self.result_box.insert(tk.END, "⏳ 에이전트 실행 중...\n", "agent_thought")
@@ -705,6 +942,7 @@ class StarCoderGUI:
                 "max_tokens": self.max_tokens.get(),
             }
             response_parts = []
+            token_count = 0
             self.root.after(0, lambda: self._chat_stream_begin(prompt))
             with requests.post(f"{API_URL}/chat/stream", json=payload, stream=True, timeout=(10, 600)) as r:
                 self._active_stream_response = r
@@ -723,13 +961,14 @@ class StarCoderGUI:
                     if t == "token":
                         token = evt.get("text", "")
                         response_parts.append(token)
+                        token_count += 1
                         self.root.after(0, lambda tok=token: self._chat_stream_token(tok))
                     elif t == "heartbeat":
-                        self.root.after(0, self._chat_stream_heartbeat)
+                        self.root.after(0, lambda n=token_count: self._chat_stream_heartbeat(n))
                     elif t == "final":
                         response = evt.get("response", "".join(response_parts))
                         elapsed = evt.get("elapsed_ms", 0)
-                        self.root.after(0, lambda resp=response, el=elapsed: self._chat_stream_final(resp, el))
+                        self.root.after(0, lambda resp=response, el=elapsed, n=token_count: self._chat_stream_final(resp, el, n))
                         break
                     elif t == "error":
                         self.root.after(0, lambda m=evt.get("error", "error"): self._on_error(m))
@@ -761,6 +1000,7 @@ class StarCoderGUI:
                 stream=True,
                 timeout=(10, 600),
             ) as r:
+                self._active_stream_response = r
                 r.raise_for_status()
                 last_beat = time.time()
                 for raw in r.iter_lines(decode_unicode=True):
@@ -780,11 +1020,11 @@ class StarCoderGUI:
                         self.root.after(0, lambda s=step: self._agent_stream_step(s))
                     elif t == "heartbeat":
                         last_beat = time.time()
-                        self.root.after(0, lambda: self._agent_stream_heartbeat())
+                        self.root.after(0, lambda n=getattr(self, "_agent_step_count", 0): self._agent_stream_heartbeat(n))
                     elif t == "final":
                         answer = evt.get("answer", "")
                         elapsed = evt.get("elapsed_ms", 0)
-                        self.root.after(0, lambda a=answer, e=elapsed: self._agent_stream_final(a, e))
+                        self.root.after(0, lambda a=answer, e=elapsed, n=getattr(self, "_agent_step_count", 0): self._agent_stream_final(a, e, n))
                     elif t == "error":
                         err = evt.get("error", "알 수 없는 오류")
                         self.root.after(0, lambda m=err: self._on_error(m))
@@ -792,6 +1032,7 @@ class StarCoderGUI:
         except Exception as e:
             self.root.after(0, lambda err=str(e): self._on_error(err))
         finally:
+            self._active_stream_response = None
             self.root.after(0, self._done_sending)
 
     def _begin_busy_indicator(self, label: str):
@@ -807,8 +1048,41 @@ class StarCoderGUI:
         self.elapsed_lbl.config(text=f"{label}... {elapsed}s")
         self.root.after(1000, self._busy_tick)
 
+    def _schedule_buffer_flush(self):
+        if self._buffer_flush_job is not None:
+            return
+        self._buffer_flush_job = self.root.after(50, self._flush_stream_buffers)
+
+    def _flush_stream_buffers(self):
+        self._buffer_flush_job = None
+        if self._cancel_requested:
+            self._chat_text_buffer.clear()
+            self._agent_step_buffer.clear()
+            return
+
+        if self._chat_text_buffer:
+            text = "".join(self._chat_text_buffer)
+            self._chat_text_buffer.clear()
+            self.result_box.config(state=tk.NORMAL)
+            self.result_box.insert(tk.END, text, "normal")
+            self.result_box.config(state=tk.DISABLED)
+            self.result_box.see(tk.END)
+
+        if self._agent_step_buffer:
+            pending = self._agent_step_buffer[:]
+            self._agent_step_buffer.clear()
+            self.result_box.config(state=tk.NORMAL)
+            for step in pending:
+                self._render_agent_step(step)
+            self.result_box.config(state=tk.DISABLED)
+            self.result_box.see(tk.END)
+
+        if self._chat_text_buffer or self._agent_step_buffer:
+            self._schedule_buffer_flush()
+
     def _chat_stream_begin(self, prompt: str):
-        self.status_bar.config(text="채팅 응답 생성 중")
+        self.status_bar.config(text="채팅 응답 생성 중", bg="#1f4d2e", fg=GREEN)
+        self.elapsed_lbl.config(text="0초 / 0토큰")
         self.result_box.config(state=tk.NORMAL)
         self.result_box.insert(tk.END, "\nSm_AICoder ▶ ", "ai_header")
         self.result_box.insert(tk.END, "\n", "normal")
@@ -817,24 +1091,28 @@ class StarCoderGUI:
     def _chat_stream_token(self, token: str):
         if self._cancel_requested:
             return
-        self.result_box.config(state=tk.NORMAL)
-        self.result_box.insert(tk.END, token, "normal")
-        self.result_box.config(state=tk.DISABLED)
-        self.result_box.see(tk.END)
+        self._chat_text_buffer.append(token)
+        self._schedule_buffer_flush()
 
-    def _chat_stream_heartbeat(self):
-        self.status_bar.config(text=f"채팅 응답 생성 중... {int(time.time() - getattr(self, '_busy_started_at', time.time()))}s")
+    def _chat_stream_heartbeat(self, token_count: int = 0):
+        elapsed = int(time.time() - getattr(self, "_busy_started_at", time.time()))
+        self.status_bar.config(text=f"채팅 응답 생성 중... {elapsed}s", bg="#1f4d2e", fg=GREEN)
+        self.elapsed_lbl.config(text=f"{elapsed}초 / {token_count}토큰")
 
-    def _chat_stream_final(self, response: str, elapsed_ms: int):
+    def _chat_stream_final(self, response: str, elapsed_ms: int, token_count: int = 0):
         if self._cancel_requested:
             return
+        self._flush_stream_buffers()
         code = self._extract_code(response)
         self.history.append({"role": "user", "content": self.input_box.get("1.0", tk.END).strip()})
         self.history.append({"role": "assistant", "content": response})
         self._append_message("assistant", response)
+        self._save_response_files(response)
         self._set_text(self.copy_box, code)
-        self.elapsed_lbl.config(text=f"{elapsed_ms / 1000:.1f}초")
-        self.status_bar.config(text="완료")
+        self.elapsed_lbl.config(text=f"{elapsed_ms / 1000:.1f}초 / {token_count}토큰")
+        self.status_bar.config(text="완료", bg="#1f2937", fg=TEXT)
+
+        self._save_state()
 
     def _cancel_current_job(self):
         self._cancel_requested = True
@@ -845,8 +1123,35 @@ class StarCoderGUI:
             except Exception:
                 pass
             self._active_stream_response = None
-        self.status_bar.config(text="취소 요청됨")
-        self.send_btn.config(state=tk.NORMAL, text="전송  (Ctrl+Enter)")
+        if self._agent_mode:
+            try:
+                requests.post(
+                    f"{API_URL}/agent/cancel",
+                    params={"session_id": self._agent_session_id},
+                    timeout=5,
+                )
+            except Exception:
+                pass
+        self.status_bar.config(text="취소 요청됨", bg="#7f1d1d", fg="#fca5a5")
+        # P4-3: 취소 시에도 in-flight 해제 후 버튼 색상 복원
+        self._inflight = False
+        self._sending = False
+        if self._agent_mode:
+            self.send_btn.config(
+                state=tk.NORMAL,
+                text="전송  (Ctrl+Enter)",
+                bg="#bc8cff",
+                fg=DARK_BG,
+                cursor="hand2",
+            )
+        else:
+            self.send_btn.config(
+                state=tk.NORMAL,
+                text="전송  (Ctrl+Enter)",
+                bg=BLUE,
+                fg=DARK_BG,
+                cursor="hand2",
+            )
         self.cancel_btn.config(state=tk.DISABLED)
 
     def _on_response(self, response, code, elapsed_ms):
@@ -857,6 +1162,7 @@ class StarCoderGUI:
 
         # AI 응답 추가
         self._append_message("assistant", response)
+        self._save_response_files(response)
 
         self._set_text(self.copy_box, code)
         self.elapsed_lbl.config(text=f"{elapsed_ms / 1000:.1f}초")
@@ -885,10 +1191,24 @@ class StarCoderGUI:
 
         self._agent_step_count = 0
         self._agent_last_beat = time.time()
-        self.elapsed_lbl.config(text="⏳ 실행 중...")
+        self.elapsed_lbl.config(text="⏳ 실행 중... / 0단계")
+        self.status_bar.config(text="에이전트 실행 중", bg="#1a365d", fg="#93c5fd")
 
     def _agent_stream_step(self, step: dict):
-        """스트리밍 단계 이벤트 — 즉시 ③ 창에 추가"""
+        """스트리밍 단계 이벤트 — 즉시 ③ 창에 추가.
+
+        P4-1: step{"kind":"token", "n":int} 이벤트는 result_box 에 렌더하지 않고
+              elapsed_lbl 의 토큰 카운터만 갱신한다. 렌더하면 수백 줄의 미완성 JSON
+              조각이 창에 쌓이기 때문이다.
+        """
+        # P4-1: token step — 화면에 표시하지 않고 카운터만 갱신
+        if step.get("kind") == "token" or step.get("type") == "token":
+            n = step.get("n", 0)
+            elapsed = int(time.time() - getattr(self, "_busy_started_at", time.time()))
+            self.elapsed_lbl.config(text=f"생성중 {n} 토큰... {elapsed}s")
+            self._agent_last_beat = time.time()
+            return
+
         self.result_box.config(state=tk.NORMAL)
         self._render_agent_step(step)
         self.result_box.config(state=tk.DISABLED)
@@ -897,13 +1217,14 @@ class StarCoderGUI:
         self._agent_step_count = getattr(self, "_agent_step_count", 0) + 1
         self._agent_last_beat = time.time()
 
-    def _agent_stream_heartbeat(self):
+    def _agent_stream_heartbeat(self, step_count: int = 0):
         """2초마다 서버가 살아있음을 알림 — 상단 경과 표시 갱신"""
         self._agent_last_beat = time.time()
-        n = getattr(self, "_agent_step_count", 0)
+        n = step_count or getattr(self, "_agent_step_count", 0)
         self.elapsed_lbl.config(text=f"⏳ 실행 중... ({n}단계)")
+        self.status_bar.config(text=f"에이전트 실행 중... {n}단계", bg="#1a365d", fg="#93c5fd")
 
-    def _agent_stream_final(self, answer: str, elapsed_ms: int):
+    def _agent_stream_final(self, answer: str, elapsed_ms: int, step_count: int = 0):
         """최종 답변 이벤트"""
         self.result_box.config(state=tk.NORMAL)
         self.result_box.insert(tk.END, "\n", "normal")
@@ -915,8 +1236,11 @@ class StarCoderGUI:
 
         code = self._extract_code(answer)
         self._set_text(self.copy_box, code)
-        n = getattr(self, "_agent_step_count", 0)
+        n = step_count or getattr(self, "_agent_step_count", 0)
         self.elapsed_lbl.config(text=f"{elapsed_ms / 1000:.1f}초 ({n}단계)")
+        self.status_bar.config(text="완료", bg="#1f2937", fg=TEXT)
+
+        self._save_state()
 
     def _render_agent_step(self, step: dict):
         """에이전트 단계 하나를 결과 패널에 렌더링"""
@@ -985,7 +1309,25 @@ class StarCoderGUI:
 
     def _done_sending(self):
         self._sending = False
-        self.send_btn.config(state=tk.NORMAL, text="전송  (Ctrl+Enter)")
+        self._inflight = False  # P4-3: in-flight 해제 — 다음 Send 클릭 허용
+        # 모드별로 원래 버튼 색상 복원
+        if self._agent_mode:
+            self.send_btn.config(
+                state=tk.NORMAL,
+                text="전송  (Ctrl+Enter)",
+                bg="#bc8cff",
+                fg=DARK_BG,
+                cursor="hand2",
+            )
+        else:
+            self.send_btn.config(
+                state=tk.NORMAL,
+                text="전송  (Ctrl+Enter)",
+                bg=BLUE,
+                fg=DARK_BG,
+                cursor="hand2",
+            )
+        self.cancel_btn.config(state=tk.DISABLED)
 
     def _show_approval_dialog(self, command: str, message: str):
         if self._approval_dialog is not None and self._approval_dialog.winfo_exists():
@@ -1076,10 +1418,10 @@ class StarCoderGUI:
             return
 
         self.approve_btn.config(state=tk.DISABLED)
-        self._pending_approval_command = ""
+        self.status_bar.config(text="권한 승인 중")
 
         self.result_box.config(state=tk.NORMAL)
-        self.result_box.insert(tk.END, f"\n[허용] {command}\n", "agent_ok")
+        self.result_box.insert(tk.END, f"\n[권한허용 요청] {command}\n", "agent_ok")
         self.result_box.config(state=tk.DISABLED)
         self.result_box.see(tk.END)
 
@@ -1095,6 +1437,8 @@ class StarCoderGUI:
                 data = r.json()
                 result_text = data.get("result", "")
                 self.root.after(0, lambda: self._append_message("assistant", result_text))
+                self.root.after(0, lambda: self.status_bar.config(text="권한 승인 완료"))
+                self._pending_approval_command = ""
             except requests.exceptions.ReadTimeout:
                 self.root.after(
                     0,
@@ -1105,6 +1449,8 @@ class StarCoderGUI:
                 )
             except Exception as e:
                 self.root.after(0, lambda err=str(e): self._on_error(err))
+            finally:
+                self.root.after(0, lambda: self.approve_btn.config(state=tk.NORMAL if self._pending_approval_command else tk.DISABLED))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1123,7 +1469,8 @@ class StarCoderGUI:
             return
         self._open_folder = os.path.abspath(folder)
         self.folder_path_lbl.config(text=self._open_folder)
-        self._refresh_folder_view()
+        self._context_injected = False   # P2-1: 새 폴더 열면 컨텍스트 플래그 리셋
+        self._refresh_folder_view(select_path=self._open_folder)
         self._save_layout()
 
     def _create_file(self):
@@ -1139,7 +1486,7 @@ class StarCoderGUI:
         if not os.path.exists(target):
             with open(target, "w", encoding="utf-8") as f:
                 f.write("")
-        self._refresh_folder_view()
+        self._refresh_folder_view(select_path=target)
 
     def _create_folder(self):
         base = self._open_folder or PROJECT_ROOT
@@ -1151,9 +1498,61 @@ class StarCoderGUI:
             messagebox.showerror("Invalid Path", "Folder must be inside OpenFolder.")
             return
         os.makedirs(target, exist_ok=True)
-        self._refresh_folder_view()
+        self._refresh_folder_view(select_path=target)
 
-    def _refresh_folder_view(self):
+    def _delete_selected_item(self):
+        path = ""
+        if hasattr(self, "folder_tree"):
+            sel = self.folder_tree.focus()
+            path = self._tree_nodes.get(sel, "")
+        if not path and self._selected_file_path:
+            path = self._selected_file_path
+        if not path:
+            messagebox.showwarning("No selection", "Select a file or folder to delete.")
+            return
+
+        base = os.path.abspath(self._open_folder or PROJECT_ROOT)
+        target = os.path.abspath(path)
+        if target == base:
+            messagebox.showwarning("Not allowed", "OpenFolder root cannot be deleted.")
+            return
+        if not target.startswith(base + os.sep):
+            messagebox.showwarning("Not allowed", "Selected item is outside OpenFolder.")
+            return
+
+        if os.path.isdir(target):
+            has_children = False
+            try:
+                has_children = len(os.listdir(target)) > 0
+            except Exception:
+                has_children = True
+            prompt = "하위 항목까지 모두 삭제하시겠습니까?" if has_children else "빈 폴더를 삭제하시겠습니까?"
+            ok = messagebox.askyesno("폴더 삭제", f"{prompt}\n\n{target}", parent=self.root)
+            if not ok:
+                return
+            try:
+                import shutil
+                shutil.rmtree(target)
+            except Exception as e:
+                messagebox.showerror("Delete failed", str(e))
+                return
+        else:
+            ok = messagebox.askyesno("파일 삭제", f"파일을 삭제하시겠습니까?\n\n{target}", parent=self.root)
+            if not ok:
+                return
+            try:
+                os.remove(target)
+            except Exception as e:
+                messagebox.showerror("Delete failed", str(e))
+                return
+
+        if self._selected_file_path and os.path.abspath(self._selected_file_path) == target:
+            self._selected_file_path = ""
+            self.file_path_lbl.config(text="No file selected")
+            self.editor_box.delete("1.0", tk.END)
+        self._refresh_folder_view(select_path=os.path.dirname(target))
+
+    def _refresh_folder_view(self, select_path=None):
         if not hasattr(self, "folder_tree"):
             return
         base = self._open_folder or PROJECT_ROOT
@@ -1163,8 +1562,28 @@ class StarCoderGUI:
         self._tree_nodes = {}
         try:
             self._insert_tree_node("", base, base, 0, max_depth=4)
+            if select_path:
+                self.root.after_idle(lambda p=os.path.abspath(select_path): self._select_tree_path(p))
         except Exception as e:
             self.preview_text_lbl.config(text=f"Error: {e}")
+
+    def _select_tree_path(self, target_path: str):
+        if not hasattr(self, "folder_tree") or not target_path:
+            return
+        target_path = os.path.abspath(target_path)
+        for node_id, path in self._tree_nodes.items():
+            if os.path.abspath(path) == target_path:
+                try:
+                    parent = self.folder_tree.parent(node_id)
+                    while parent:
+                        self.folder_tree.item(parent, open=True)
+                        parent = self.folder_tree.parent(parent)
+                    self.folder_tree.selection_set(node_id)
+                    self.folder_tree.focus(node_id)
+                    self.folder_tree.see(node_id)
+                except Exception:
+                    pass
+                break
 
     def _insert_tree_node(self, parent_id: str, path: str, base: str, depth: int, max_depth: int = 4):
         if depth > max_depth:
@@ -1315,24 +1734,38 @@ class StarCoderGUI:
                 return f"{os.path.basename(path)}\n{ext}\n{size} bytes\nToo large to preview"
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.read().splitlines()
-            head = lines[:8]
+            head = lines[:4]                # P2-2: 8→4
             text = "\n".join(head)
-            if len(lines) > 8:
+            if len(lines) > 4:
                 text += "\n..."
             return f"{os.path.basename(path)}\n{ext}\n{size} bytes\n\n{text}".strip()
         except Exception as e:
             return f"{os.path.basename(path)}\nPreview unavailable: {e}"
 
     def _build_prompt_with_context(self, prompt: str) -> str:
+        # P2-1: 첫 턴(또는 새 폴더)에만 폴더 트리/파일 요약을 주입한다.
+        # 두 번째 턴부터는 선택 파일 내용과 첨부만 포함.
         base = self._open_folder or PROJECT_ROOT
-        lines = [f"[OpenFolder] {base}", "[Folder files]"]
-        for row in self._folder_rows[:200]:
-            try:
-                rel = os.path.relpath(row, base)
-            except Exception:
-                rel = row
-            lines.append(f"- {rel}")
-        lines.append("")
+        lines: list[str] = []
+
+        if not self._context_injected:
+            # ── 첫 턴 전용 컨텍스트 ──────────────────────────────
+            lines += [f"[OpenFolder] {base}", "[Folder files]"]
+            for row in self._folder_rows[:50]:          # P2-2: 200→50
+                try:
+                    rel = os.path.relpath(row, base)
+                except Exception:
+                    rel = row
+                lines.append(f"- {rel}")
+            lines.append("")
+            lines.append("[Folder summaries]")
+            for path in self._folder_rows[:5]:          # P2-2: 12→5
+                if os.path.isfile(path):
+                    lines.append(self._read_file_summary(path))
+                    lines.append("")
+            self._context_injected = True
+
+        # ── 매 턴 포함: 선택 파일 내용 ──────────────────────────
         if self._selected_file_path:
             lines.append(f"[Selected file] {self._selected_file_path}")
             try:
@@ -1343,14 +1776,11 @@ class StarCoderGUI:
                 lines.append("[Selected file content]")
                 lines.append(editor_text)
                 lines.append("")
-        lines.append("[Folder summaries]")
-        for path in self._folder_rows[:12]:
-            if os.path.isfile(path):
-                lines.append(self._read_file_summary(path))
-                lines.append("")
+
         if self._attachments:
             lines.append("[Attachments]")
             lines.extend(f"- {p}" for p in self._attachments)
+
         lines.append("")
         lines.append(prompt)
         return "\n".join(lines)
@@ -1366,6 +1796,10 @@ class StarCoderGUI:
             return
 
         self._agent_mode = not self._agent_mode
+        self._save_state()
+        self._apply_mode_ui()
+
+    def _apply_mode_ui(self):
         if self._agent_mode:
             self.mode_btn.config(text="에이전트 모드", bg="#2d1a4e", fg="#bc8cff")
             self.mode_indicator.config(text="파일탐색·패치·테스트 자동실행", fg="#bc8cff")

@@ -1,4 +1,4 @@
-chcp 65001 | Out-Null
+﻿chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $env:PYTHONUTF8 = "1"
@@ -21,7 +21,7 @@ function Test-ServerHealthy {
 }
 
 if (-not (Test-ServerHealthy)) {
-    Write-Host "Sm_AICoder 서버가 오프라인입니다. 백그라운드에서 서버를 시작합니다..."
+    Write-Host "Sm_AICoder 서버가 실행 중이 아닙니다. 백그라운드에서 서버를 시작합니다..."
     Start-Process -FilePath $venv -ArgumentList "-X utf8 `"$serverLauncher`"" -WorkingDirectory $scriptDir -WindowStyle Hidden | Out-Null
     Start-Sleep -Seconds 1
 }

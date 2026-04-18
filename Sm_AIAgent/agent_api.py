@@ -47,8 +47,15 @@ def fail_request(entry, err: str):
         mod.fail_request(entry, err)
 
 
+def _estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
 router = APIRouter(prefix="/agent", tags=["agent"])
 _sessions: dict[str, AgentLoop] = {}
+_session_cancel_flags: dict[str, bool] = {}
 
 
 class AgentRequest(BaseModel):
@@ -103,6 +110,7 @@ def _get_or_create_agent(
         agent.max_iterations = max_iterations
         agent.temperature = temperature
         agent.max_tokens = max_tokens
+    _session_cancel_flags.setdefault(session_id, False)
 
     return agent, steps
 
@@ -138,7 +146,7 @@ def agent_run(req: AgentRequest):
         fail_request(entry, f"{type(e).__name__}: {e}")
         raise HTTPException(500, f"에이전트 실행 오류: {type(e).__name__}: {e}")
 
-    finish_request(entry, 0, 0, elapsed, answer)
+    finish_request(entry, _estimate_tokens(req.message), _estimate_tokens(answer), elapsed, answer)
 
     return AgentResponse(
         answer=answer,
@@ -179,7 +187,7 @@ def agent_stream(req: AgentRequest):
                 os.chdir(req.working_dir)
             answer = agent.run(req.message)
             elapsed = int((time.time() - t0) * 1000)
-            finish_request(entry, 0, 0, elapsed, answer)
+            finish_request(entry, _estimate_tokens(req.message), _estimate_tokens(answer), elapsed, answer)
             q.put(("final", {"answer": answer, "elapsed_ms": elapsed}))
         except Exception as e:
             fail_request(entry, f"{type(e).__name__}: {e}")
@@ -195,8 +203,13 @@ def agent_stream(req: AgentRequest):
 
     def gen():
         while True:
+            if _session_cancel_flags.get(req.session_id):
+                agent.cancel()
+                _session_cancel_flags[req.session_id] = False
+                yield json.dumps({"type": "error", "error": "cancelled"}, ensure_ascii=False) + "\n"
+                break
             try:
-                item = q.get(timeout=2.0)
+                item = q.get(timeout=1.0)
             except queue.Empty:
                 yield json.dumps({"type": "heartbeat", "ts": time.time()}, ensure_ascii=False) + "\n"
                 continue
@@ -213,6 +226,15 @@ def agent_stream(req: AgentRequest):
                 yield json.dumps({"type": "error", **payload}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+@router.post("/cancel")
+def agent_cancel(session_id: str = "default"):
+    _session_cancel_flags[session_id] = True
+    agent = _sessions.get(session_id)
+    if agent is not None:
+        agent.cancel()
+    return {"status": "ok", "session_id": session_id}
 
 
 @router.post("/approve")

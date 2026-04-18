@@ -1,4 +1,4 @@
-chcp 65001 | Out-Null
+﻿chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $env:PYTHONUTF8 = "1"
 
@@ -21,7 +21,7 @@ try {
     Write-Host "========================================"
     Write-Host ""
 
-    Write-Host "[1/5] 의존 패키지 확인..."
+    Write-Host "[1/5] 필수 패키지 확인..."
     $piCheck = & $venvPython -c "import PyInstaller" 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "      PyInstaller 없음 -> 설치 중..."
@@ -32,7 +32,7 @@ try {
         }
         Write-Host "      PyInstaller 설치 완료."
     } else {
-        Write-Host "      PyInstaller 이미 설치되어 있습니다."
+        Write-Host "      PyInstaller가 이미 설치되어 있습니다."
     }
 
     $plCheck = & $venvPython -c "import PIL" 2>&1
@@ -45,22 +45,22 @@ try {
         }
         Write-Host "      Pillow 설치 완료."
     } else {
-        Write-Host "      Pillow 이미 설치되어 있습니다."
+        Write-Host "      Pillow가 이미 설치되어 있습니다."
     }
 
     Write-Host ""
     Write-Host "[2/5] 이전 빌드 파일 정리..."
     if (Test-Path "dist\Sm_AiCoderClient.exe") {
         Remove-Item "dist\Sm_AiCoderClient.exe" -Force
-        Write-Host "      dist\Sm_AiCoderClient.exe 삭제됨."
+        Write-Host "      dist\Sm_AiCoderClient.exe 삭제"
     }
     if (Test-Path "build") {
         Remove-Item "build" -Recurse -Force
-        Write-Host "      build\ 폴더 삭제됨."
+        Write-Host "      build 폴더 삭제"
     }
     if (Test-Path "Sm_AiCoderClient.spec") {
         Remove-Item "Sm_AiCoderClient.spec" -Force
-        Write-Host "      Sm_AiCoderClient.spec 삭제됨."
+        Write-Host "      Sm_AiCoderClient.spec 삭제"
     }
 
     Write-Host ""
@@ -103,12 +103,12 @@ print(tk)
     if ($tkPath) {
         Write-Host "      TK : $tkPath"
     } else {
-        Write-Host "      [경고] TK  경로를 찾지 못했습니다."
+        Write-Host "      [경고] TK 경로를 찾지 못했습니다."
     }
 
     Write-Host ""
     Write-Host "[5/5] PyInstaller 빌드 실행 중..."
-    Write-Host "      (시간이 1~3분 소요될 수 있습니다)"
+    Write-Host "      (완료까지 1~3분 정도 걸릴 수 있습니다)"
     Write-Host ""
 
     $buildArgs = @(
@@ -128,7 +128,7 @@ print(tk)
         $buildArgs += "icon.ico"
         $buildArgs += "--add-data"
         $buildArgs += "icon.ico;."
-        Write-Host "      아이콘: icon.ico 적용"
+        Write-Host "      아이콘 icon.ico 적용"
     }
 
     if ($tclPath) {
@@ -152,13 +152,13 @@ print(tk)
         Write-Host " 복사 완료: $dest"
         Write-Host "========================================"
         Write-Host ""
-        Write-Host "[주의] exe 실행 전 api_server(서버)가 먼저 구동되어 있어야 합니다."
+        Write-Host "[주의] exe 실행 전 api_server(서버)가 먼저 실행되어 있어야 합니다."
         Write-Host ""
         Write-Host "Sm_AiCoderClient.exe 실행 중..."
         Start-Process $dest
     } else {
         Write-Host ""
-        Write-Host "[오류] 빌드 실패. 위 로그를 확인하세요."
+        Write-Host "[오류] 빌드 실패. 로그를 확인하세요."
         exit 1
     }
 }

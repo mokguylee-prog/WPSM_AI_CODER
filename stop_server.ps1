@@ -1,4 +1,4 @@
-chcp 65001 | Out-Null
+﻿chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -37,27 +37,27 @@ if ($listenerPid) {
 $targetPids = $targetPids | Sort-Object -Unique
 
 if (-not $targetPids -or $targetPids.Count -eq 0) {
-    Write-Host "종료할 서버 PID를 찾지 못했습니다. (port:$port)"
+    Write-Host "실행 중인 서버 PID를 찾지 못했습니다. (port:$port)"
     if (Test-Path $pidFile) {
         Remove-Item $pidFile -ErrorAction SilentlyContinue
-        Write-Host "stale server.pid 삭제 완료"
+        Write-Host "오래된 server.pid를 삭제했습니다."
     }
     exit
 }
 
 foreach ($targetPid in $targetPids) {
-    Write-Host "종료 시도 중... (PID: $targetPid)"
+    Write-Host "서버 종료 시도 중... (PID: $targetPid)"
     $result = taskkill /PID $targetPid /T /F 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "종료 완료 (PID: $targetPid)"
+        Write-Host "서버 종료 완료 (PID: $targetPid)"
     } else {
-        Write-Host "이미 종료되었거나 찾을 수 없음 (PID: $targetPid)"
+        Write-Host "이미 종료되었거나 찾을 수 없습니다. (PID: $targetPid)"
     }
 }
 
 if (Test-Path $pidFile) {
     Remove-Item $pidFile -ErrorAction SilentlyContinue
-    Write-Host "server.pid 삭제 완료"
+    Write-Host "server.pid를 삭제했습니다."
 }
 
 Start-Sleep -Milliseconds 500
@@ -65,5 +65,5 @@ $remainingListener = Get-ListenerPid -TargetPort $port
 if ($remainingListener) {
     Write-Host "경고: 포트 $port 리스너가 아직 남아 있습니다. (PID: $remainingListener)"
 } else {
-    Write-Host "포트 $port 리스너 종료 확인 완료"
+    Write-Host "포트 $port 리스너 종료를 확인했습니다."
 }

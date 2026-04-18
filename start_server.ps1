@@ -8,5 +8,5 @@ $venv = Join-Path $scriptDir "venv\Scripts\python.exe"
 if (-not (Test-Path $venv)) { $venv = "python" }
 $serverLauncher = Join-Path $serverDir "server.py"
 
-Write-Host "Sm_AICoder 서버 시작..."
-& $venv $serverLauncher
+Write-Host "Sm_AICoder 서버를 시작합니다..."
+& $venv -X utf8 $serverLauncher

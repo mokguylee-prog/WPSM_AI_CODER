@@ -23,6 +23,15 @@ DEFAULT_CONFIG = {
         "C:\\Windows",
         "C:\\Program Files",
     ],
+    # P5-2: 모델 라우팅
+    #   first    — 첫 번째 사용자 턴에 사용할 모델 파일명 패턴 (큰 모델)
+    #   followup — 후속 도구 호출 턴에 사용할 모델 파일명 패턴 (작은 모델)
+    #   패턴은 파일명에 포함된 문자열을 대소문자 무시로 매칭한다.
+    #   None 으로 설정하면 단일 모델 모드(라우팅 비활성화).
+    "model_route": {
+        "first": "qwen2.5-coder-7b",
+        "followup": "qwen2.5-coder-1.5b",
+    },
 }
 
 
