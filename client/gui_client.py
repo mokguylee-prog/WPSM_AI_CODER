@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, filedialog, simpledialog, ttk
+import collections
 import requests
 import threading
 import subprocess
@@ -154,6 +155,8 @@ class StarCoderGUI:
         self._chat_text_buffer = []
         self._agent_step_buffer = []
         self._buffer_flush_job = None
+        self._stream_token_deque: collections.deque = collections.deque()
+        self._stream_render_job = None
         self._result_events = list(self._state.get("result_events", []))
         self._context_injected = False   # P2-1: 첫 턴 1회만 컨텍스트 주입 플래그
         self._server_fail_count = 0
@@ -1039,7 +1042,7 @@ class StarCoderGUI:
                         token = evt.get("text", "")
                         response_parts.append(token)
                         token_count += 1
-                        self.root.after(0, lambda tok=token, e=epoch: self._chat_stream_token(tok, e))
+                        self._stream_token_deque.append(token)
                     elif t == "heartbeat":
                         self.root.after(0, lambda n=token_count, e=epoch: self._chat_stream_heartbeat(n, e))
                     elif t == "final":
@@ -1144,6 +1147,64 @@ class StarCoderGUI:
         self.elapsed_lbl.config(text=f"{label}... {elapsed}s")
         self.root.after(1000, self._busy_tick)
 
+    # ── 배치 스트림 렌더 (150ms 주기) ──────────────────────────────────────
+    def _start_stream_render_timer(self, epoch: int | None = None):
+        if self._stream_render_job is not None:
+            return
+        self._stream_render_job = self.root.after(
+            150, lambda e=epoch: self._render_stream_batch(e)
+        )
+
+    def _stop_stream_render_timer(self):
+        job = self._stream_render_job
+        self._stream_render_job = None
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+
+    def _render_stream_batch(self, epoch: int | None = None):
+        self._stream_render_job = None
+        if epoch is not None and not self._is_epoch_current(epoch):
+            self._stream_token_deque.clear()
+            return
+        if self._cancel_requested:
+            self._stream_token_deque.clear()
+            return
+        tokens = []
+        try:
+            while True:
+                tokens.append(self._stream_token_deque.popleft())
+        except IndexError:
+            pass
+        if tokens:
+            text = "".join(tokens)
+            self.result_box.config(state=tk.NORMAL)
+            self.result_box.insert(tk.END, text, "normal")
+            self.result_box.config(state=tk.DISABLED)
+            self.result_box.see(tk.END)
+        if self._sending:
+            self._stream_render_job = self.root.after(
+                150, lambda e=epoch: self._render_stream_batch(e)
+            )
+
+    def _drain_stream_token_deque(self):
+        """스트림 종료 시 deque에 남은 토큰을 즉시 렌더링."""
+        self._stop_stream_render_timer()
+        tokens = []
+        try:
+            while True:
+                tokens.append(self._stream_token_deque.popleft())
+        except IndexError:
+            pass
+        if tokens:
+            text = "".join(tokens)
+            self.result_box.config(state=tk.NORMAL)
+            self.result_box.insert(tk.END, text, "normal")
+            self.result_box.config(state=tk.DISABLED)
+            self.result_box.see(tk.END)
+
     def _schedule_buffer_flush(self):
         if self._buffer_flush_job is not None:
             return
@@ -1161,6 +1222,8 @@ class StarCoderGUI:
     def _cleanup_stream_state(self, epoch: int | None = None):
         if epoch is not None and not self._is_epoch_current(epoch):
             return
+        self._stop_stream_render_timer()
+        self._stream_token_deque.clear()
         self._cancel_buffer_flush()
         self._chat_text_buffer.clear()
         self._agent_step_buffer.clear()
@@ -1208,6 +1271,8 @@ class StarCoderGUI:
         self.result_box.insert(tk.END, "\nSm_AICoder ▶ ", "ai_header")
         self.result_box.insert(tk.END, "\n", "normal")
         self.result_box.config(state=tk.DISABLED)
+        self._stream_token_deque.clear()
+        self._start_stream_render_timer(epoch)
 
     def _chat_stream_token(self, token: str, epoch: int | None = None):
         if epoch is not None and not self._is_epoch_current(epoch):
@@ -1229,6 +1294,7 @@ class StarCoderGUI:
             return
         if self._cancel_requested:
             return
+        self._drain_stream_token_deque()
         self._flush_stream_buffers()
         code = self._extract_code(response)
         self.history.append({"role": "user", "content": self.input_box.get("1.0", tk.END).strip()})
