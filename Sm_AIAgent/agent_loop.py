@@ -9,6 +9,7 @@ import json
 import re
 import time
 import os
+import threading
 import requests
 from typing import Optional, Callable
 
@@ -207,6 +208,11 @@ class AgentLoop:
 
     def cancel(self):
         self._cancel_requested = True
+        # 서버에도 즉시 취소 신호 전달 — pending 엔트리 정리 + 추론 중단
+        try:
+            requests.post(f"{self.api_url}/cancel", timeout=2)
+        except Exception:
+            pass
 
     def _estimate_prompt_tokens(self, messages: list[dict]) -> int:
         """P6-2: 硫붿떆吏 ?꾩껜 ?띿뒪??湲몄씠瑜?湲곗??쇰줈 ?좏겙 ?섎? 蹂댁닔?곸쑝濡?異붿젙?쒕떎.
@@ -326,11 +332,7 @@ class AgentLoop:
         return "".join(chunks) if chunks else None
 
     def _call_llm_blocking(self) -> Optional[str]:
-        """force_json 紐⑤뱶 ?꾩슜 ??鍮꾩뒪?몃━諛?/chat ?몄텧 (GBNF 洹몃옒癒??꾩슂).
-
-        P4-2: ??寃쎈줈??IDLE_TIMEOUT_S 媛 ?곸슜?섏? ?딅뒗??
-              force_json=True ?ъ슜?먮뒗 湲??湲곕? 媛먯닔?댁빞 ?쒕떎.
-        """
+        """force_json 모드 /chat 호출. 별도 스레드에서 실행하고 0.5초마다 취소를 확인한다."""
         messages = self.context.get_messages(self.system_prompt)
         payload = {
             "messages": [{"role": m["role"], "content": m["content"]} for m in messages],
@@ -338,16 +340,32 @@ class AgentLoop:
             "temperature": self.temperature,
             "force_json": True,
         }
-        try:
-            r = requests.post(f"{self.api_url}/chat", json=payload, timeout=(10, 300))
-            r.raise_for_status()
-            data = r.json()
-            return data.get("response", "")
-        except requests.exceptions.ConnectionError:
-            return None
-        except Exception:
-            return None
 
+        result: list = [None]
+        fetch_error: list = [None]
+        done_event = threading.Event()
+
+        def _fetch():
+            try:
+                r = requests.post(f"{self.api_url}/chat", json=payload, timeout=(10, 300))
+                r.raise_for_status()
+                result[0] = r.json().get("response", "")
+            except Exception as e:
+                fetch_error[0] = e
+            finally:
+                done_event.set()
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+        while not done_event.wait(timeout=0.5):
+            if self._cancel_requested:
+                return None  # cancel()에서 서버 /cancel 이미 호출됨
+
+        if self._cancel_requested:
+            return None
+        if fetch_error[0] is not None:
+            return None
+        return result[0]
     def _parse_response(self, text: str) -> Optional[dict]:
         """Extract JSON action object from model output.
 

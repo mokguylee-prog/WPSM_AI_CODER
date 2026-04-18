@@ -619,6 +619,28 @@ def chat_stream(req: ChatStreamRequest):
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
+@app.post("/cancel")
+def cancel_inference():
+    """클라이언트가 명시적으로 취소를 요청할 때 호출.
+    진행 중인 추론을 즉시 중단하고 pending 엔트리를 cancelled 로 마킹한다.
+    """
+    global _active_cancel
+    cancelled = False
+    if _active_cancel is not None and not _active_cancel.is_set():
+        _active_cancel.set()
+        cancelled = True
+        print("[cancel] Client requested cancel — cancel_event set")
+
+    # pending 상태인 엔트리를 모두 cancelled 로 전환
+    for entry in recent_requests:
+        if entry.get("status") == "pending":
+            entry["status"] = "cancelled"
+            entry["response"] = "[cancelled by client]"
+            entry["elapsed_ms"] = round((time.time() - entry.get("_t0", time.time())) * 1000)
+
+    return {"cancelled": cancelled}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "model": model_name}
