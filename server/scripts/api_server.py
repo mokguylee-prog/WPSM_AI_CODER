@@ -247,6 +247,9 @@ def finish_request(entry: dict, prompt_tokens: int, gen_tokens: int, elapsed_ms:
 def fail_request(entry: dict, err: str):
     if entry.get("status") == "cancelled":
         return  # 취소된 요청은 덮어쓰지 않음
+    if err.startswith("cancelled"):
+        cancel_request(entry)
+        return
     entry["status"] = "error"
     entry["response"] = f"[error] {err}"
     entry["elapsed_ms"] = round((time.time() - entry.get("_t0", time.time())) * 1000)
@@ -800,6 +803,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .status-badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:600; margin-right:6px; }
   .status-pending { background:#3d2e0a; color:#d29922; animation: blink 1.2s infinite; }
   .status-error { background:#2a1414; color:#f85149; }
+  .status-cancelled { background:#1e1e2e; color:#8b8bbb; }
   @keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: 0.55 } }
   .refresh-info { font-size: 0.75rem; color: #484f58; margin-top: 16px; text-align: right; }
   .modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:100; justify-content:center; align-items:center; }
@@ -965,7 +969,9 @@ async function refresh() {
         const rowCls = status === 'pending' ? 'clickable pending' : (status === 'error' ? 'clickable error' : 'clickable');
         const badge = status === 'pending'
           ? '<span class="status-badge status-pending">Pending</span>'
-          : (status === 'error' ? '<span class="status-badge status-error">Error</span>' : '');
+          : status === 'error' ? '<span class="status-badge status-error">Error</span>'
+          : status === 'cancelled' ? '<span class="status-badge status-cancelled">Cancelled</span>'
+          : '';
         const elapsed = status === 'pending' ? `${fmtDurationMs(r.elapsed_ms)} elapsed...` : fmtDurationMs(r.elapsed_ms);
         const ptCell = status === 'pending' ? '-' : fmtNumber(r.prompt_tokens);
         const gtCell = status === 'pending' ? '-' : fmtNumber(r.gen_tokens);

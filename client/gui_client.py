@@ -1245,6 +1245,11 @@ class StarCoderGUI:
         self._cancel_requested = True
         self._cleanup_stream_state()
         self._mark_agent_session_dirty()
+        # 서버 추론 취소 + pending 엔트리 정리 (모든 모드 공통)
+        try:
+            requests.post(f"{API_URL}/cancel", timeout=2)
+        except Exception:
+            pass
         if self._agent_mode:
             try:
                 requests.post(
